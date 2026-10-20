@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* =========================================================================
+   PURO APURE ERP - MANUAL DE MARCA & SISTEMA DE DISEÑO OFICIAL (FASE 1)
+   ADN Cromático Oficial y Jerarquía Tipográfica
+   ========================================================================= */
+
+@theme {
+  --color-brand-green: #13381B;
+  --color-brand-red: #8A2E1A;
+  --color-brand-orange: #D6451B;
+  --color-brand-yellow: #F6C121;
+  --color-brand-cream: #EAD2B2;
+
+  --font-heading: 'Montserrat', sans-serif;
+  --font-body: 'Noto Sans', sans-serif;
+}
+
+:root {
+  --brand-green: #13381B;
+  --brand-red: #8A2E1A;
+  --brand-orange: #D6451B;
+  --brand-yellow: #F6C121;
+  --brand-cream: #EAD2B2;
+}
+
+/* Light Mode Global Branding Variables */
+html.light,
+html:not(.dark) {
+  --bg-primary: #EAD2B2; /* brand-cream para superficies y fondos principales */
+  --bg-surface: #FFFFFF; /* tarjetas y contenedores de datos */
+  --text-primary: #13381B; /* brand-green dominante para textos principales */
+  --text-secondary: #8A2E1A; /* brand-red para subtítulos y sector porcino */
+  --accent-poultry: #D6451B; /* brand-orange para sector avícola */
+  --accent-highlight: #F6C121; /* brand-yellow para detalles e indicadores */
+}
+
+/* Jerarquía Tipográfica */
+body {
+  font-family: 'Noto Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-weight: 400; /* Regular */
+}
+
+h1, h2, h3, h4, h5, h6, .font-heading, .brand-heading {
+  font-family: 'Montserrat', sans-serif;
+  font-weight: 800; /* ExtraBold oficial */
+  letter-spacing: -0.02em;
+}
+
+button, table, input, select, textarea, .font-body {
+  font-family: 'Noto Sans', sans-serif;
+}
+
+.font-medium-body {
+  font-family: 'Noto Sans', sans-serif;
+  font-weight: 500; /* Medium */
+}
+
+/* Touch Targets accessibility WCAG 2.1 AA */
+.touch-target {
+  min-width: 44px;
+  min-height: 44px;
+}
