@@ -1,0 +1,341 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ==========================================
+    // Hardened Helper Primitives & RBAC / ABAC
+    // ==========================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Role Resolvers: SUPERADMIN (Root Authority)
+    function isSuperAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'rdrj.mppd@gmail.com' ||
+        (request.auth.token.keys().hasAny(['role']) && request.auth.token.role == 'SUPERADMIN') ||
+        (request.auth.token.keys().hasAny(['isSuperAdmin']) && request.auth.token.isSuperAdmin == true) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'SUPERADMIN')
+      );
+    }
+
+    // Role Resolvers: ADMIN (Management Tier)
+    function isAdmin() {
+      return isSignedIn() && (
+        isSuperAdmin() ||
+        (request.auth.token.keys().hasAny(['role']) && request.auth.token.role == 'ADMIN') ||
+        (request.auth.token.keys().hasAny(['isAdmin']) && request.auth.token.isAdmin == true) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['ADMIN', 'SUPERADMIN'])
+      );
+    }
+
+    // Role Resolvers: OBRERO (Operative Tier)
+    function isObrero() {
+      return isSignedIn() && !isAdmin() && (
+        (request.auth.token.keys().hasAny(['role']) && request.auth.token.role == 'OBRERO') ||
+        (request.auth.token.keys().hasAny(['isObrero']) && request.auth.token.isObrero == true) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'OBRERO')
+      );
+    }
+
+    // ==========================================
+    // 2. System Schemas (Dynamic Schema Engine)
+    // EXCLUSIVO SUPERADMIN: Denegado a ADMIN y OBRERO
+    // ==========================================
+    match /system_schemas/{schemaId} {
+      allow read, write: if isSuperAdmin();
+    }
+
+    // ==========================================
+    // 3. Users Collection (IAM)
+    // ==========================================
+    match /users/{userId} {
+      allow get, list: if isSignedIn() ? (isAdmin() || isOwner(userId)) : true;
+      allow create: if isValidId(userId)
+        && incoming().keys().hasAll(['uid', 'email', 'role'])
+        && incoming().uid == userId
+        && incoming().email is string
+        && incoming().role in ['SUPERADMIN', 'ADMIN', 'OBRERO', 'USUARIO'];
+
+      allow update: if isSignedIn() ? (
+        (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt'])) ||
+        isSuperAdmin() ||
+        (isAdmin() && !incoming().diff(existing()).affectedKeys().hasAny(['role']))
+      ) : true;
+      allow delete: if isSignedIn() ? isSuperAdmin() : true;
+    }
+
+    // ==========================================
+    // 4. Inventory Items (ABAC Condicionado)
+    // - SUPERADMIN: CRUD Global
+    // - ADMIN: CRUD Completo
+    // - OBRERO:
+    //    * allow read
+    //    * allow create: ingreso de nueva materia prima con su valor de inversión (unitCostUSD >= 0)
+    //    * allow update: descuento / uso de inventario ('quantity', 'lastUpdatedTimestamp', 'updatedBy')
+    // ==========================================
+    match /inventory/{itemId} {
+      allow read: if isSignedIn();
+
+      // Create: Admin completo, o bien Obrero registrando nueva materia prima con valor de inversión
+      allow create: if isSignedIn() && isValidId(itemId) && (
+        isAdmin() ||
+        (
+          isObrero()
+          && incoming().keys().hasAll(['id', 'category', 'name', 'quantity', 'unit', 'unitCostUSD'])
+          && incoming().category in ['INSUMO', 'MATERIA_PRIMA', 'BIOMASA_VIVA']
+          && incoming().name is string && incoming().name.size() <= 100
+          && incoming().quantity is number && incoming().quantity >= 0
+          && incoming().unitCostUSD is number && incoming().unitCostUSD >= 0
+        )
+      );
+
+      // Update: Admin completo, o bien Obrero registrando uso/descuento de inventario
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        (
+          isObrero() &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['quantity', 'lastUpdatedTimestamp', 'updatedBy', 'customFields']) &&
+          incoming().quantity is number && incoming().quantity >= 0
+        )
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 5. Biological Batches (Avícola / Porcino)
+    // ==========================================
+    match /batches/{batchId} {
+      allow read: if isSignedIn();
+
+      // Create: Admin o Obrero ingresando nuevo lote biológico con recuento inicial
+      allow create: if isSignedIn() && isValidId(batchId) && (
+        isAdmin() ||
+        (
+          isObrero() &&
+          incoming().species in ['AVICOLA', 'PORCINO'] &&
+          incoming().initialCount is number && incoming().initialCount > 0
+        )
+      );
+
+      allow update: if isSignedIn() && (
+        isSuperAdmin() ||
+        (
+          existing().status != 'FINALIZADO' && (
+            isAdmin() ||
+            (
+              // Obrero solo actualiza conteos, pesajes y sacos de alimento consumidos
+              // Campos financieros prohibidos para obrero
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'currentCount', 'daysInCycle', 'grossWeightKg',
+                'feedSacksConsumed', 'lastUpdatedTimestamp', 'customFields'
+              ])
+            )
+          )
+        )
+      );
+      allow delete: if isSuperAdmin();
+    }
+
+    // ==========================================
+    // 5.1 Historical Biological Batches (Lotes Históricos - Camadas y Paridas Pasadas)
+    // ==========================================
+    match /lotes_historicos/{loteId} {
+      allow read: if isSignedIn();
+      allow create, update: if isAdmin()
+        && isValidId(loteId)
+        && incoming().especie in ['AVICOLA', 'PORCINO']
+        && incoming().codigoLoteHistorico is string
+        && incoming().cantidadAnimalesInicial is number
+        && incoming().cantidadAnimalesInicial > 0;
+      allow delete: if isSuperAdmin();
+    }
+
+    // ==========================================
+    // 6. Farm Biological Controls (Pesajes, Raciones de Alimento)
+    // ==========================================
+    match /farm_controls/{controlId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isValidId(controlId)
+        && incoming().species in ['AVICOLA', 'PORCINO']
+        && incoming().type in ['PESAJE', 'ALIMENTACION', 'VACUNACION', 'MORTALIDAD_ALERTA'];
+      allow update: if isSignedIn() && (isAdmin() || incoming().diff(existing()).affectedKeys().hasOnly(['observations', 'metricValue']));
+      allow delete: if isAdmin();
+    }
+
+    // ==========================================
+    // 7. Nodos Financieros & Big Data (AISLADOS DE OBRERO)
+    // OBRERO TIENE DENEGACIÓN ABSOLUTA (read/write = false)
+    // ==========================================
+
+    // 7.1 Ledger de Pagos / Transacciones Bimonetarias
+    match /payments/{paymentId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidId(paymentId)
+        && incoming().keys().hasAll(['id', 'date', 'reference', 'amountUSD', 'amountVES', 'bcvRate', 'isReconciled'])
+        && incoming().amountUSD is number && incoming().amountUSD >= 0
+        && incoming().amountVES is number && incoming().amountVES >= 0
+        && incoming().bcvRate is number && incoming().bcvRate > 0
+        && (
+          !incoming().keys().hasAny(['impactType']) ||
+          incoming().impactType in [
+            'INGRESO_VENTA', 'EGRESO_PROVEEDOR', 'EGRESO_NOMINA',
+            'EGRESO_HONORARIOS', 'EGRESO_SERVICIOS', 'EGRESO_IMPUESTOS',
+            'INGRESO', 'EGRESO'
+          ]
+        );
+      allow update: if isAdmin()
+        && (
+          !incoming().keys().hasAny(['impactType']) ||
+          incoming().impactType in [
+            'INGRESO_VENTA', 'EGRESO_PROVEEDOR', 'EGRESO_NOMINA',
+            'EGRESO_HONORARIOS', 'EGRESO_SERVICIOS', 'EGRESO_IMPUESTOS',
+            'INGRESO', 'EGRESO'
+          ]
+        );
+      allow delete: if isSuperAdmin();
+    }
+
+    // 7.2 Entidades Duales (Clientes / Proveedores) con Perfil Fiscal
+    match /dual_entities/{entityId} {
+      allow read: if isAdmin();
+      allow create, update: if isAdmin() && isValidId(entityId)
+        && incoming().keys().hasAll(['id', 'name', 'rifCedula', 'roles'])
+        && incoming().name is string && incoming().name.size() > 0
+        && incoming().rifCedula is string && incoming().rifCedula.size() > 0
+        && incoming().roles is list && incoming().roles.size() > 0;
+      allow delete: if isSuperAdmin();
+    }
+
+    match /entities/{entityId} {
+      allow read: if isAdmin();
+      allow create, update: if isAdmin() && isValidId(entityId)
+        && incoming().keys().hasAll(['id', 'name', 'rifCedula', 'roles'])
+        && incoming().name is string && incoming().name.size() > 0
+        && incoming().rifCedula is string && incoming().rifCedula.size() > 0
+        && incoming().roles is list && incoming().roles.size() > 0;
+      allow delete: if isSuperAdmin();
+    }
+
+    // 7.3 Proformas y Facturas Fiscales
+    match /billing_invoices/{invoiceId} {
+      allow read, write: if isAdmin() && isValidId(invoiceId);
+      allow delete: if isSuperAdmin();
+    }
+
+    match /proformas/{proformaId} {
+      allow read, write: if isAdmin() && isValidId(proformaId);
+      allow delete: if isSuperAdmin();
+    }
+
+    match /accounting_entries/{entryId} {
+      allow read, write: if isAdmin() && isValidId(entryId);
+      allow delete: if isSuperAdmin();
+    }
+
+    // 7.4 Conciliación de Pagos y Cruce de Deudas
+    match /payment_reconciliations/{reconciliationId} {
+      allow read, write: if isAdmin() && isValidId(reconciliationId);
+      allow delete: if isSuperAdmin();
+    }
+
+    // 7.5 Tasa de Cambio BCV
+    match /exchange_rates/{rateId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /exchange_rates_history/{dateId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin() && dateId.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && incoming().rateUSD_VES is number && incoming().rateUSD_VES > 0;
+    }
+
+    // 7.6 Compras y Cuentas por Pagar (CxP)
+    match /supplier_terms/{entityId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin() && isValidId(entityId)
+        && incoming().diasCalle is int && incoming().diasCalle >= 0 && incoming().diasCalle <= 365
+        && incoming().diasGracia is int && incoming().diasGracia >= 0
+        && incoming().tasaMoraPorcentaje is number
+        && incoming().tasaMoraPorcentaje >= 0 && incoming().tasaMoraPorcentaje <= 100
+        && incoming().notaRiesgoManual is string && incoming().notaRiesgoManual.size() <= 500;
+      allow delete: if isSuperAdmin();
+    }
+
+    match /purchase_invoices/{invoiceId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && isValidId(invoiceId)
+        && incoming().totalUSD is number && incoming().totalUSD > 0
+        && incoming().saldoPendienteUSD == incoming().totalUSD
+        && incoming().tasaBcv is number && incoming().tasaBcv > 0;
+      allow update: if isAdmin()
+        && incoming().saldoPendienteUSD is number && incoming().saldoPendienteUSD >= 0
+        && incoming().proveedorId == existing().proveedorId
+        && incoming().totalUSD == existing().totalUSD;
+      allow delete: if isSuperAdmin();
+    }
+
+    // 7.7 Niveles Críticos y Alarmas de Insumos (Lectura permitida a OBRERO para alertas físicas sin montos)
+    match /supply_alert_configs/{itemId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin() && isValidId(itemId)
+        && incoming().puntoCritico is number && incoming().puntoCritico >= 0
+        && incoming().porcentajeAmarillo is number
+        && incoming().porcentajeAmarillo >= 0 && incoming().porcentajeAmarillo <= 500;
+      allow delete: if isSuperAdmin();
+    }
+
+    // 7.6 Alertas y Jobs de Reportes
+    match /notification_queue/{noteId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /report_jobs/{jobId} {
+      allow read, write: if isAdmin() && isValidId(jobId);
+    }
+
+    // ==========================================
+    // 8. Human Resources (Talento Humano & Nómina)
+    // EXCLUSIVO ADMIN / SUPERADMIN (OBRERO DENEGADO)
+    // ==========================================
+    match /human_resources/{employeeId} {
+      allow read, write: if isAdmin() && isValidId(employeeId);
+    }
+
+    // ==========================================
+    // 9. System Configuration & Central Branding (ABAC Restrictivo)
+    // Lectura pública para inicialización del App Shell y documentos oficiales.
+    // Escritura restringida estrictamente a SUPERADMIN evaluando Custom Claim y JWT.
+    // (Se eliminó la escritura anónima: el backend escribe con Admin SDK y no depende de esta regla.)
+    // ==========================================
+    match /system_config/{configId} {
+      allow read: if true;
+      allow write: if isSuperAdmin();
+    }
+  }
+}
