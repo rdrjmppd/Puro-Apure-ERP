@@ -1,0 +1,590 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with role-based access control and contact information",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Unique user identifier from Firebase Auth"
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Full name of the user"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["SUPERADMIN", "ADMIN", "USUARIO"],
+          "description": "Authorization level in the agroindustrial ERP"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of creation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "InventoryItem": {
+      "title": "InventoryItem",
+      "description": "Supplies and live biomass inventory records",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Inventory item document ID"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["INSUMO", "BIOMASA_VIVA"],
+          "description": "Category of inventory"
+        },
+        "name": {
+          "type": "string",
+          "description": "Name of the supply or biomass item"
+        },
+        "quantity": {
+          "type": "number",
+          "description": "Current on-hand quantity"
+        },
+        "unit": {
+          "type": "string",
+          "description": "Unit of measurement (kg, sacos, unidades, litros)"
+        },
+        "unitCostUSD": {
+          "type": "number",
+          "description": "Cost per unit in USD"
+        },
+        "lastUpdatedTimestamp": {
+          "type": "number",
+          "description": "Timestamp for cloud concurrency resolution"
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "UID of the user who made the last change"
+        }
+      },
+      "required": ["id", "category", "name", "quantity", "unit", "unitCostUSD"]
+    },
+    "BiologicalBatch": {
+      "title": "BiologicalBatch",
+      "description": "Avian and Porcine livestock lifecycle tracking batches",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Batch unique code"
+        },
+        "species": {
+          "type": "string",
+          "enum": ["AVICOLA", "PORCINO"],
+          "description": "Biological animal group"
+        },
+        "initialCount": {
+          "type": "number",
+          "description": "Initial number of animals"
+        },
+        "currentCount": {
+          "type": "number",
+          "description": "Active animal count"
+        },
+        "daysInCycle": {
+          "type": "number",
+          "description": "Number of days elapsed in cycle"
+        },
+        "grossWeightKg": {
+          "type": "number",
+          "description": "Gross live weight in kilograms"
+        },
+        "shrinkageDeductionKg": {
+          "type": "number",
+          "description": "Validated shrinkage deduction (15-20kg for porcine, 0 for avian)"
+        },
+        "netWeightKg": {
+          "type": "number",
+          "description": "Net billable weight"
+        },
+        "feedSacksConsumed": {
+          "type": "number",
+          "description": "Feed bags consumed (4 sacks at 40 USD for porcine target)"
+        },
+        "billableAmountUSD": {
+          "type": "number",
+          "description": "Total calculated invoice amount in USD"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ACTIVO", "FINALIZADO"],
+          "description": "Lifecycle state of the batch"
+        },
+        "lastUpdatedTimestamp": {
+          "type": "number",
+          "description": "Timestamp for optimistic locking"
+        }
+      },
+      "required": ["id", "species", "initialCount", "status"]
+    },
+    "PaymentRecord": {
+      "title": "PaymentRecord",
+      "description": "Bimonetary financial payment and transaction ledger",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Payment transaction ID"
+        },
+        "date": {
+          "type": "string",
+          "description": "Payment date YYYY-MM-DD"
+        },
+        "paymentMode": {
+          "type": "string",
+          "description": "Payment modality (Transferencia, PagoMovil, Efectivo, Zelle)"
+        },
+        "platform": {
+          "type": "string",
+          "description": "Bank platform or gateway"
+        },
+        "reference": {
+          "type": "string",
+          "description": "Bank voucher or transaction confirmation reference"
+        },
+        "idDocument": {
+          "type": "string",
+          "description": "Tax ID / RIF / Cedula"
+        },
+        "city": {
+          "type": "string",
+          "description": "City of origin or operation"
+        },
+        "linkedInvoice": {
+          "type": "string",
+          "description": "Linked invoice number or batch ID"
+        },
+        "impactType": {
+          "type": "string",
+          "enum": [
+            "INGRESO_VENTA",
+            "EGRESO_PROVEEDOR",
+            "EGRESO_NOMINA",
+            "EGRESO_HONORARIOS",
+            "EGRESO_SERVICIOS",
+            "EGRESO_IMPUESTOS",
+            "INGRESO",
+            "EGRESO"
+          ],
+          "description": "Financial direction and specialized accounting classification of funds"
+        },
+        "amountUSD": {
+          "type": "number",
+          "description": "Snapshot amount in USD"
+        },
+        "amountVES": {
+          "type": "number",
+          "description": "Snapshot amount in VES"
+        },
+        "bcvRate": {
+          "type": "number",
+          "description": "Frozen historical BCV exchange rate at transaction moment"
+        },
+        "isReconciled": {
+          "type": "boolean",
+          "description": "Whether payment has been bank-cleared"
+        }
+      },
+      "required": ["id", "date", "reference", "amountUSD", "amountVES", "bcvRate", "isReconciled"]
+    },
+    "SystemSchema": {
+      "title": "SystemSchema",
+      "description": "Dynamic schema definitions and custom fields configured by Superadmin without code recompilation",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Schema definition unique ID"
+        },
+        "targetModule": {
+          "type": "string",
+          "enum": ["INVENTARIO", "TRAZABILIDAD", "FINANZAS", "GENERAL"],
+          "description": "Platform module where dynamic fields are injected"
+        },
+        "fieldName": {
+          "type": "string",
+          "description": "Unique key identifier for the dynamic field"
+        },
+        "fieldLabel": {
+          "type": "string",
+          "description": "Human readable label in forms and tables"
+        },
+        "fieldType": {
+          "type": "string",
+          "enum": ["TEXTO", "NUMERO", "SELECTOR", "BOOLEANO"],
+          "description": "Input data type"
+        },
+        "options": {
+          "type": "string",
+          "description": "Comma separated options if fieldType is SELECTOR"
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether the dynamic field is mandatory"
+        },
+        "defaultValue": {
+          "type": "string",
+          "description": "Default initial value"
+        },
+        "description": {
+          "type": "string",
+          "description": "Help text or tooltip for users"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "ISO timestamp of creation"
+        },
+        "createdBy": {
+          "type": "string",
+          "description": "UID of the SuperAdmin creator"
+        }
+      },
+      "required": ["id", "targetModule", "fieldName", "fieldLabel", "fieldType"]
+    },
+    "HumanResourceRecord": {
+      "title": "HumanResourceRecord",
+      "description": "Personnel catalog distinguishing Nomina Fija and Honorarios Profesionales",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Worker document ID"
+        },
+        "cedula": {
+          "type": "string",
+          "description": "Venezuelan identity document ID"
+        },
+        "nombreCompleto": {
+          "type": "string",
+          "description": "Full name of the worker"
+        },
+        "cargo": {
+          "type": "string",
+          "description": "Job title or position"
+        },
+        "departamento": {
+          "type": "string",
+          "description": "Assigned operational department"
+        },
+        "tipoContrato": {
+          "type": "string",
+          "enum": ["NOMINA_FIJA", "HONORARIOS_PROFESIONALES"],
+          "description": "Discriminator contract type"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ACTIVO", "INACTIVO", "SUSPENDIDO"],
+          "description": "Operational activity status"
+        },
+        "sueldoBaseUSD": {
+          "type": "number",
+          "description": "Base salary in USD (mandatory for NOMINA_FIJA)"
+        },
+        "aportesParafiscalesUSD": {
+          "type": "number",
+          "description": "Parafiscal social contributions in USD (mandatory for NOMINA_FIJA)"
+        },
+        "fechaIngreso": {
+          "type": "string",
+          "description": "Hiring date in ISO format YYYY-MM-DD (mandatory for NOMINA_FIJA)"
+        },
+        "tarifaServicioUSD": {
+          "type": "number",
+          "description": "Independent service fee in USD (mandatory for HONORARIOS_PROFESIONALES)"
+        },
+        "frecuenciaPago": {
+          "type": "string",
+          "enum": ["SEMANAL", "QUINCENAL", "MENSUAL", "POR_OBRA"],
+          "description": "Service payment frequency (mandatory for HONORARIOS_PROFESIONALES)"
+        },
+        "descripcionServicio": {
+          "type": "string",
+          "description": "Service description or scope of work (mandatory for HONORARIOS_PROFESIONALES)"
+        },
+        "lastUpdatedTimestamp": {
+          "type": "number",
+          "description": "Timestamp for optimistic offline sync"
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "UID or username of the updater"
+        }
+      },
+      "required": ["id", "cedula", "nombreCompleto", "cargo", "tipoContrato", "status"]
+    },
+    "HRStats": {
+      "title": "HRStats",
+      "description": "Atomic counters metadata document for real-time personnel totals",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Document ID fixed to hr_stats"
+        },
+        "activeNominaFijaCount": {
+          "type": "number",
+          "description": "Count of active fixed payroll workers"
+        },
+        "activeHonorariosCount": {
+          "type": "number",
+          "description": "Count of active independent contractor workers"
+        },
+        "totalActiveCount": {
+          "type": "number",
+          "description": "Total count of active workers"
+        },
+        "totalInactiveCount": {
+          "type": "number",
+          "description": "Total count of inactive workers"
+        },
+        "totalMonthlyNominaUSD": {
+          "type": "number",
+          "description": "Total monthly payroll cost in USD"
+        },
+        "totalMonthlyHonorariosUSD": {
+          "type": "number",
+          "description": "Total monthly independent fee cost in USD"
+        },
+        "lastUpdatedTimestamp": {
+          "type": "number",
+          "description": "Timestamp of last update"
+        },
+        "lastUpdatedBy": {
+          "type": "string",
+          "description": "Operator who updated stats"
+        }
+      },
+      "required": ["id", "activeNominaFijaCount", "activeHonorariosCount", "totalActiveCount"]
+    },
+    "DualEntity": {
+      "title": "DualEntity",
+      "description": "CRM/VRM dual customer and supplier counterparty catalog with tax and SENIAT profiles",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Entity unique ID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Legal business or natural person name"
+        },
+        "rifCedula": {
+          "type": "string",
+          "description": "Tax ID RIF (J/G/V/E) or identity card"
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["CLIENTE", "PROVEEDOR"]
+          },
+          "description": "Counterparty roles allowing dual cross-clearing"
+        },
+        "city": {
+          "type": "string",
+          "description": "Operational city"
+        },
+        "address": {
+          "type": "string",
+          "description": "Physical address"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Primary phone"
+        },
+        "balanceUSD": {
+          "type": "number",
+          "description": "Net consolidated balance in USD (positive = receivable, negative = payable)"
+        },
+        "balanceVES": {
+          "type": "number",
+          "description": "Net consolidated balance in VES"
+        },
+        "balancePorCobrarUSD": {
+          "type": "number",
+          "description": "Total accounts receivable subtotal in USD"
+        },
+        "balancePorPagarUSD": {
+          "type": "number",
+          "description": "Total accounts payable subtotal in USD"
+        },
+        "perfilFiscal": {
+          "type": "object",
+          "properties": {
+            "regimenIva": {
+              "type": "string",
+              "enum": ["GENERAL", "EXENTO", "RETENCION_75", "RETENCION_100"]
+            },
+            "contribuyenteEspecial": {
+              "type": "string",
+              "enum": ["ORDINARIO", "ESPECIAL", "FORMAL"]
+            },
+            "porcentajeRetencionIslr": {
+              "type": "number"
+            },
+            "direccionFiscal": {
+              "type": "string"
+            },
+            "emailFacturacion": {
+              "type": "string"
+            },
+            "telefonoContacto": {
+              "type": "string"
+            }
+          },
+          "description": "Tax and fiscal SENIAT configuration profile"
+        },
+        "lastUpdatedTimestamp": {
+          "type": "number",
+          "description": "Timestamp of last update"
+        }
+      },
+      "required": ["id", "name", "rifCedula", "roles"]
+    },
+    "PaymentReconciliation": {
+      "title": "PaymentReconciliation",
+      "description": "Submódulo de Conciliación de Pagos y cruce de deudas CRM/BRM",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fecha": { "type": "string" },
+        "modalidad": { "type": "string", "enum": ["CONTADO", "CREDITO"] },
+        "metodoPago": {
+          "type": "string",
+          "enum": [
+            "TRANSFERENCIA", "PAGO_MOVIL", "EFECTIVO_VES", "EFECTIVO_USD",
+            "BINANCE_USDT", "INTERNACIONAL", "CL", "CRUCE_CUENTAS", "RETENCION"
+          ]
+        },
+        "bancoPlataforma": { "type": "string" },
+        "numeroReferencia": { "type": "string" },
+        "clienteNombre": { "type": "string" },
+        "clienteRif": { "type": "string" },
+        "clienteId": { "type": "string" },
+        "facturaId": { "type": "string" },
+        "facturaNumero": { "type": "string" },
+        "loteId": { "type": "string" },
+        "monedaRecibida": { "type": "string", "enum": ["VES", "USD"] },
+        "montoRecibido": { "type": "number" },
+        "tasaBcv": { "type": "number" },
+        "montoUSD": { "type": "number" },
+        "montoVES": { "type": "number" },
+        "tipoImpacto": {
+          "type": "string",
+          "enum": ["INGRESO_HOY", "INGRESO_EXTEMPORANEO", "CRUCE_CUENTAS", "RETENCION_FISCAL"]
+        },
+        "estado": { "type": "string", "enum": ["CONCILIADO", "PENDIENTE"] },
+        "observaciones": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["id", "fecha", "modalidad", "metodoPago", "clienteNombre", "clienteRif", "facturaId", "monedaRecibida", "montoRecibido", "montoUSD", "tipoImpacto"]
+    },
+    "AccountingEntry": {
+      "title": "AccountingEntry",
+      "description": "Asiento contable con modalidad, método de pago y detalle de producto",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string" },
+        "modalidadTransaccion": { "type": "string", "enum": ["CONTADO", "CREDITO"] },
+        "metodoPago": { "type": "string" },
+        "amountUSD": { "type": "number" },
+        "amountVES": { "type": "number" },
+        "bcvRate": { "type": "number" }
+      },
+      "required": ["id", "date", "amountUSD", "amountVES", "bcvRate"]
+    },
+    "ProformaInvoice": {
+      "title": "ProformaInvoice",
+      "description": "Factura proforma con financiamiento a crédito y detalle de lote",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "modalidadTransaccion": { "type": "string", "enum": ["CONTADO", "CREDITO"] },
+        "totalUSD": { "type": "number" },
+        "totalVES": { "type": "number" }
+      },
+      "required": ["id", "invoiceNumber", "totalUSD"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "User profiles and permissions collection"
+    },
+    "/inventory/{itemId}": {
+      "schema": {
+        "$ref": "#/entities/InventoryItem"
+      },
+      "description": "Agricultural supplies and biomass live stock"
+    },
+    "/batches/{batchId}": {
+      "schema": {
+        "$ref": "#/entities/BiologicalBatch"
+      },
+      "description": "Avian and Porcine livestock life cycles"
+    },
+    "/payments/{paymentId}": {
+      "schema": {
+        "$ref": "#/entities/PaymentRecord"
+      },
+      "description": "Dual currency financial transactions ledger"
+    },
+    "/dual_entities/{entityId}": {
+      "schema": {
+        "$ref": "#/entities/DualEntity"
+      },
+      "description": "CRM/VRM dual customer and supplier counterparty catalog with tax profiles"
+    },
+    "/system_schemas/{schemaId}": {
+      "schema": {
+        "$ref": "#/entities/SystemSchema"
+      },
+      "description": "Dynamic schema engine definitions accessible only to Superadmin"
+    },
+    "/human_resources/{employeeId}": {
+      "schema": {
+        "$ref": "#/entities/HumanResourceRecord"
+      },
+      "description": "Human resources personnel and contractor records with hr_stats metadata document"
+    },
+    "/payment_reconciliations/{reconciliationId}": {
+      "schema": {
+        "$ref": "#/entities/PaymentReconciliation"
+      },
+      "description": "Payment reconciliations and debt deduction entries"
+    },
+    "/accounting_entries/{entryId}": {
+      "schema": {
+        "$ref": "#/entities/AccountingEntry"
+      },
+      "description": "Accounting ledger entries with transaction modality and product detail"
+    },
+    "/proformas/{proformaId}": {
+      "schema": {
+        "$ref": "#/entities/ProformaInvoice"
+      },
+      "description": "Proforma invoices with credit terms and livestock batch traceability"
+    }
+  }
+}

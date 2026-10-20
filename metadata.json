@@ -1,0 +1,6 @@
+{
+  "name": "AgroERP Pro - ERP Agroindustrial Bimonetario",
+  "description": "Sistema ERP Agroindustrial Offline-First bimonetario con trazabilidad biológica avícola/porcina, conciliación cambiaria y gestión financiera.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,17 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // 1. Regla ABAC Estricta para Identidad Corporativa (Fotografía / Logotipo del Sistema)
+    // Lectura pública para hidratación en App Shell y documentos oficiales.
+    // Escritura restringida criptográficamente al token JWT con Custom Claim de SUPERADMIN.
+    match /system_branding/{imageId} {
+      allow read: if true;
+      allow write: if request.auth != null && (request.auth.token.role == 'SUPERADMIN' || request.auth.token.email == 'rdrj.mppd@gmail.com');
+    }
+
+    // 2. Denegación Global por Defecto (Zero Trust Architecture)
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "summary": "Diagnóstico exhaustivo de causa raíz del error de comunicación en Fabi y plan de solución definitiva mediante motor de contingencia offline local (4s timeout), blindaje HTTP contra redirecciones cross-browser y resiliencia en granja.",
+  "updatedAt": "2026-10-14T02:03:14.970715719Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

@@ -1,0 +1,41 @@
+{
+  "name": "Puro Apure ERP - Sistema de Gestión Agroindustrial",
+  "short_name": "Puro Apure ERP",
+  "description": "Sistema ERP Agroindustrial Puro Apure Offline-First bimonetario con sincronización y trazabilidad.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/puro_apure_logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Trazabilidad & Lotes",
+      "short_name": "Lotes",
+      "description": "Gestión de biomasa avícola y porcina",
+      "url": "/#inventarios",
+      "icons": [{ "src": "/icon.svg", "sizes": "any" }]
+    },
+    {
+      "name": "Facturación Proforma",
+      "short_name": "Facturas",
+      "description": "Emisión de proformas bimonetarias BCV",
+      "url": "/#finanzas",
+      "icons": [{ "src": "/icon.svg", "sizes": "any" }]
+    }
+  ]
+}
