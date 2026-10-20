@@ -269,6 +269,24 @@ export class WhatsAppCloneService {
     };
 
     try {
+      // 1. Intentar entrega en vivo a través de la pasarela Baileys si el servidor local está activo
+      try {
+        if (typeof window !== 'undefined') {
+          fetch('/api/whatsapp/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              lineaId,
+              toPhone: destNorm,
+              text: texto,
+              mediaDataUrl: mediaUrl,
+            }),
+          }).catch(() => {});
+        }
+      } catch {
+        // En entorno cloud o desconectado, continuar con persistencia
+      }
+
       const docRef = doc(db, MESSAGES_COLLECTION, msgId);
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
         await offlineSyncEngine.enqueueMutation(MESSAGES_COLLECTION, msgId, 'SET', message, {

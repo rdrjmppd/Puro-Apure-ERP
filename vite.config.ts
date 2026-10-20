@@ -7,7 +7,13 @@ import { fetchBCVRate, initBCVCronJob } from './server/fetchBCVRate';
 import { createUserAccountHandler, listUsersHandler } from './server/createUserAccount';
 import { askGeminiAssistantHandler } from './server/askGeminiAssistant';
 import { uploadLogoHandler, resetLogoHandler, getBrandingHandler, ensureBrandingIntegrity } from './server/uploadLogo';
-import { getWhatsAppLineStatusHandler, generateQrCodeHandler, confirmPairingHandler } from './server/whatsappQrBridge';
+import {
+  getWhatsAppLineStatusHandler,
+  generateQrCodeHandler,
+  confirmPairingHandler,
+  sendWhatsAppMessageHandler,
+  disconnectWhatsAppLineHandler,
+} from './server/whatsappQrBridge';
 
 function bcvServerProxyPlugin(): Plugin {
   return {
@@ -219,6 +225,51 @@ function bcvServerProxyPlugin(): Plugin {
         const qr = await generateQrCodeHandler(lineaId);
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true, ...qr }));
+      });
+
+            server.middlewares.use('/api/whatsapp/send', async (req: any, res: any) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: 'Method Not Allowed' }));
+          return;
+        }
+        let body = '';
+        req.on('data', (chunk: any) => (body += chunk));
+        req.on('end', async () => {
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            const result = await sendWhatsAppMessageHandler(
+              parsed.lineaId || 'linea_cobranzas',
+              parsed.toPhone || '',
+              parsed.text || '',
+              parsed.mediaDataUrl
+            );
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(result));
+          } catch (e: any) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ success: false, error: e.message }));
+          }
+        });
+      });
+
+      server.middlewares.use('/api/whatsapp/disconnect', async (req: any, res: any) => {
+        let body = '';
+        req.on('data', (chunk: any) => (body += chunk));
+        req.on('end', async () => {
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            const result = await disconnectWhatsAppLineHandler(parsed.lineaId || 'linea_cobranzas');
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(result));
+          } catch (e: any) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ success: false, error: e.message }));
+          }
+        });
       });
 
       server.middlewares.use('/api/whatsapp/pair', async (req: any, res: any) => {

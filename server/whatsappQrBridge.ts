@@ -1,101 +1,427 @@
 /**
  * ============================================================================
- * PURO APURE ERP — SERVER MIDDLEWARE / API PROXY: whatsappQrBridge
+ * PURO APURE ERP — SERVER MIDDLEWARE / API GATEWAY: whatsappQrBridge
  * ============================================================================
- * Servidor puente para conectividad WhatsApp QR y gestión multi-dispositivo.
- * Compatible tanto con servidor local como con el contenedor de Google AI Studio.
+ * Pasarela Multi-Dispositivo auténtica con @whiskeysockets/baileys y QRCode.
+ * Conexión criptográfica real mediante WebSockets a los servidores de WhatsApp.
+ * Sincronización bidireccional en tiempo real con Cloud Firestore.
  * ============================================================================
  */
 
+import makeWASocket, {
+  DisconnectReason,
+  useMultiFileAuthState,
+  Browsers,
+  downloadMediaMessage,
+  WASocket,
+} from '@whiskeysockets/baileys';
+import QRCode from 'qrcode';
+import pino from 'pino';
+import fs from 'fs';
+import path from 'path';
+import admin from './firebaseAdmin';
+
 export interface WhatsAppQrBridgeStatus {
   lineaId: string;
-  estado: 'CONECTADO' | 'ESPERANDO_QR' | 'DESCONECTADO';
+  estado: 'CONECTADO' | 'ESPERANDO_QR' | 'DESCONECTADO' | 'ERROR';
   qrCodeDataUri?: string;
   numeroConectado?: string;
   uptimeSeconds: number;
+  lastError?: string;
 }
 
+// Mapa de Sockets activos y estados en memoria
+const activeSockets = new Map<string, WASocket>();
 const activeLinesState = new Map<string, WhatsAppQrBridgeStatus>();
+const lineStartTimes = new Map<string, number>();
 
-// Inicializar estados en memoria
+// Inicializar estados por defecto
 const defaultLines = ['linea_cobranzas', 'linea_ventas', 'linea_brm'];
 defaultLines.forEach((id) => {
   activeLinesState.set(id, {
     lineaId: id,
-    estado: 'CONECTADO',
-    numeroConectado: id === 'linea_cobranzas' ? '+584140000001' : id === 'linea_ventas' ? '+584140000002' : '+584140000003',
-    uptimeSeconds: 3600,
+    estado: 'DESCONECTADO',
+    uptimeSeconds: 0,
   });
 });
 
+/**
+ * Obtiene o crea la ruta local de la sesión de Baileys para la línea
+ */
+function getSessionDir(lineaId: string): string {
+  const dir = path.resolve(process.cwd(), '.whatsapp_sessions', lineaId);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+/**
+ * Sincroniza el estado de la línea con Firestore para que el frontend (incluso en AI Studio) lo lea en tiempo real
+ */
+async function syncLineToFirestore(lineaId: string, status: Partial<WhatsAppQrBridgeStatus>) {
+  try {
+    const db = admin.firestore();
+    const docRef = db.collection('whatsapp_lineas').doc(lineaId);
+    await docRef.set(
+      {
+        ...status,
+        lastActivityTimestamp: Date.now(),
+        isOnline: status.estado === 'CONECTADO',
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    // Modo offline o sin credenciales admin, continuar en memoria
+    console.debug(`[WhatsApp Bridge] Sincronización Firestore en memoria para ${lineaId}`);
+  }
+}
+
+/**
+ * Guarda un mensaje entrante o saliente en Firestore
+ */
+async function saveMessageToFirestore(messageData: {
+  id: string;
+  lineaId: string;
+  remitenteTelefono: string;
+  destinatarioTelefono: string;
+  direccion: 'ENTRANTE' | 'SALIENTE';
+  texto: string;
+  timestamp: number;
+  estado: 'ENVIADO' | 'ENTREGADO' | 'LEIDO';
+  tipoMensaje: 'TEXTO' | 'IMAGEN';
+  mediaUrl?: string;
+  hasComprobantePago?: boolean;
+}) {
+  try {
+    const db = admin.firestore();
+    const docRef = db.collection('whatsapp_mensajes').doc(messageData.id);
+    await docRef.set({
+      ...messageData,
+      whatsappMessageId: messageData.id,
+      ocrStatus: messageData.hasComprobantePago ? 'PENDIENTE' : 'NO_ANALIZADO',
+    });
+    console.log(`[WhatsApp Bridge] Mensaje ${messageData.id} guardado en Firestore.`);
+  } catch (err) {
+    console.warn(`[WhatsApp Bridge] No se pudo guardar mensaje en Firestore:`, err);
+  }
+}
+
+/**
+ * Inicia o recupera el socket auténtico de Baileys para la línea especificada
+ */
+export async function initializeBaileysSocket(lineaId: string): Promise<WASocket> {
+  const existing = activeSockets.get(lineaId);
+  if (existing) {
+    return existing;
+  }
+
+  const sessionDir = getSessionDir(lineaId);
+  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+
+  const sock = makeWASocket({
+    auth: state,
+    logger: pino({ level: 'silent' }),
+    browser: Browsers.macOS('Desktop'),
+    printQRInTerminal: false,
+    syncFullHistory: false,
+  });
+
+  activeSockets.set(lineaId, sock);
+  lineStartTimes.set(lineaId, Date.now());
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { qr, connection, lastDisconnect } = update;
+
+    if (qr) {
+      console.log(`[WhatsApp Bridge] Real QR generado para ${lineaId}`);
+      try {
+        const qrDataUri = await QRCode.toDataURL(qr, { margin: 2, scale: 8 });
+        const currentState = activeLinesState.get(lineaId) || {
+          lineaId,
+          estado: 'ESPERANDO_QR',
+          uptimeSeconds: 0,
+        };
+        currentState.estado = 'ESPERANDO_QR';
+        currentState.qrCodeDataUri = qrDataUri;
+        activeLinesState.set(lineaId, currentState);
+
+        await syncLineToFirestore(lineaId, {
+          estado: 'ESPERANDO_QR',
+          qrCodeDataUri,
+        });
+      } catch (qrErr) {
+        console.error(`[WhatsApp Bridge] Error generando imagen QR:`, qrErr);
+      }
+    }
+
+    if (connection === 'open') {
+      const connectedPhone = sock.user?.id ? `+${sock.user.id.split(':')[0]}` : '+584140000000';
+      console.log(`[WhatsApp Bridge] ¡Línea ${lineaId} CONECTADA exitosamente con ${connectedPhone}!`);
+
+      const currentState: WhatsAppQrBridgeStatus = {
+        lineaId,
+        estado: 'CONECTADO',
+        numeroConectado: connectedPhone,
+        qrCodeDataUri: undefined,
+        uptimeSeconds: Math.floor((Date.now() - (lineStartTimes.get(lineaId) || Date.now())) / 1000),
+      };
+      activeLinesState.set(lineaId, currentState);
+
+      await syncLineToFirestore(lineaId, {
+        estado: 'CONECTADO',
+        numeroConectado: connectedPhone,
+        qrCodeDataUri: undefined,
+      });
+    }
+
+    if (connection === 'close') {
+      const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      console.log(
+        `[WhatsApp Bridge] Conexión cerrada para ${lineaId}. Código: ${statusCode}. Reconectar: ${shouldReconnect}`
+      );
+
+      activeSockets.delete(lineaId);
+
+      if (shouldReconnect) {
+        console.log(`[WhatsApp Bridge] Intentando reconectar ${lineaId} en 5 segundos...`);
+        setTimeout(() => {
+          initializeBaileysSocket(lineaId).catch(console.error);
+        }, 5000);
+      } else {
+        // Sesión cerrada definitivamente por el usuario en WhatsApp
+        const currentState: WhatsAppQrBridgeStatus = {
+          lineaId,
+          estado: 'DESCONECTADO',
+          uptimeSeconds: 0,
+        };
+        activeLinesState.set(lineaId, currentState);
+        await syncLineToFirestore(lineaId, {
+          estado: 'DESCONECTADO',
+          qrCodeDataUri: undefined,
+        });
+
+        // Limpiar archivos de sesión
+        try {
+          fs.rmSync(sessionDir, { recursive: true, force: true });
+        } catch {
+          // ignore
+        }
+      }
+    }
+  });
+
+  // Escuchar mensajes entrantes en tiempo real
+  sock.ev.on('messages.upsert', async ({ messages: newMessages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const msg of newMessages) {
+      if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
+
+      const remoteJid = msg.key.remoteJid || '';
+      const isFromMe = msg.key.fromMe || false;
+      const phoneDigits = remoteJid.replace('@s.whatsapp.net', '').replace(/[^\d]/g, '');
+      const senderPhone = `+${phoneDigits}`;
+      const myPhone = sock.user?.id ? `+${sock.user.id.split(':')[0]}` : '+584140000000';
+
+      let textContent =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        msg.message.imageMessage?.caption ||
+        '';
+
+      let mediaUrl: string | undefined = undefined;
+      const isImage = !!msg.message.imageMessage;
+
+      if (isImage) {
+        try {
+          const buffer = await downloadMediaMessage(
+            msg,
+            'buffer',
+            {},
+            {
+              logger: pino({ level: 'silent' }),
+              reuploadRequest: sock.updateMediaMessage,
+            }
+          );
+          const mime = msg.message.imageMessage?.mimetype || 'image/jpeg';
+          mediaUrl = `data:${mime};base64,${buffer.toString('base64')}`;
+          if (!textContent) {
+            textContent = '[Comprobante de Pago adjunto]';
+          }
+        } catch (mediaErr) {
+          console.warn('[WhatsApp Bridge] Error al descargar imagen:', mediaErr);
+        }
+      }
+
+      await saveMessageToFirestore({
+        id: msg.key.id || `msg_${Date.now()}`,
+        lineaId,
+        remitenteTelefono: isFromMe ? myPhone : senderPhone,
+        destinatarioTelefono: isFromMe ? senderPhone : myPhone,
+        direccion: isFromMe ? 'SALIENTE' : 'ENTRANTE',
+        texto: textContent,
+        timestamp: (msg.messageTimestamp as number) * 1000 || Date.now(),
+        estado: 'LEIDO',
+        tipoMensaje: isImage ? 'IMAGEN' : 'TEXTO',
+        mediaUrl,
+        hasComprobantePago: isImage,
+      });
+    }
+  });
+
+  return sock;
+}
+
+/**
+ * Consulta el estado de una línea de WhatsApp
+ */
 export async function getWhatsAppLineStatusHandler(lineaId: string): Promise<WhatsAppQrBridgeStatus> {
   const current = activeLinesState.get(lineaId);
-  if (current) return current;
+  if (!current) {
+    const fallback: WhatsAppQrBridgeStatus = {
+      lineaId,
+      estado: 'DESCONECTADO',
+      uptimeSeconds: 0,
+    };
+    activeLinesState.set(lineaId, fallback);
+    return fallback;
+  }
 
-  const created: WhatsAppQrBridgeStatus = {
-    lineaId,
-    estado: 'CONECTADO',
-    numeroConectado: '+584140000000',
-    uptimeSeconds: 120,
-  };
-  activeLinesState.set(lineaId, created);
-  return created;
+  if (current.estado === 'CONECTADO') {
+    current.uptimeSeconds = Math.floor((Date.now() - (lineStartTimes.get(lineaId) || Date.now())) / 1000);
+  }
+
+  return current;
 }
 
-export async function generateQrCodeHandler(lineaId: string): Promise<{ qrDataUri: string }> {
-  // Generar QR visual SVG en Base64 representativo de pairing de WhatsApp Web
-  const dummyQrSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
-    <rect width="200" height="200" fill="#ffffff" rx="12"/>
-    <!-- Patrón QR de sincronización multi-dispositivo Puro Apure -->
-    <rect x="20" y="20" width="40" height="40" fill="#065F46"/>
-    <rect x="28" y="28" width="24" height="24" fill="#ffffff"/>
-    <rect x="34" y="34" width="12" height="12" fill="#065F46"/>
-    <rect x="140" y="20" width="40" height="40" fill="#065F46"/>
-    <rect x="148" y="28" width="24" height="24" fill="#ffffff"/>
-    <rect x="154" y="34" width="12" height="12" fill="#065F46"/>
-    <rect x="20" y="140" width="40" height="40" fill="#065F46"/>
-    <rect x="28" y="148" width="24" height="24" fill="#ffffff"/>
-    <rect x="34" y="154" width="12" height="12" fill="#065F46"/>
-    <!-- Bits centrales -->
-    <rect x="80" y="30" width="12" height="12" fill="#10B981"/>
-    <rect x="105" y="45" width="12" height="12" fill="#065F46"/>
-    <rect x="75" y="80" width="50" height="50" fill="#D97706" rx="6"/>
-    <circle cx="100" cy="105" r="16" fill="#ffffff"/>
-    <path d="M94 100 L106 100 L100 112 Z" fill="#065F46"/>
-    <rect x="140" y="90" width="14" height="14" fill="#065F46"/>
-    <rect x="160" y="120" width="12" height="12" fill="#10B981"/>
-    <rect x="85" y="150" width="16" height="16" fill="#065F46"/>
-    <rect x="120" y="150" width="20" height="20" fill="#065F46"/>
-  </svg>`;
+/**
+ * Genera y devuelve el código QR auténtico de WhatsApp
+ */
+export async function generateQrCodeHandler(lineaId: string): Promise<{ qrDataUri: string; estado: string }> {
+  // Iniciar el socket si no existe
+  await initializeBaileysSocket(lineaId);
 
-  const base64Svg = Buffer.from(dummyQrSvg).toString('base64');
-  const qrDataUri = `data:image/svg+xml;base64,${base64Svg}`;
+  // Esperar hasta 5 segundos para que WhatsApp emita el QR si aún no está disponible
+  let current = activeLinesState.get(lineaId);
+  let waited = 0;
+  while (!current?.qrCodeDataUri && current?.estado !== 'CONECTADO' && waited < 5000) {
+    await new Promise((r) => setTimeout(r, 200));
+    waited += 200;
+    current = activeLinesState.get(lineaId);
+  }
 
-  const current = activeLinesState.get(lineaId) || {
+  return {
+    qrDataUri: current?.qrCodeDataUri || '',
+    estado: current?.estado || 'ESPERANDO_QR',
+  };
+}
+
+/**
+ * Envía un mensaje real a través del socket activo de WhatsApp
+ */
+export async function sendWhatsAppMessageHandler(
+  lineaId: string,
+  toPhone: string,
+  text: string,
+  mediaDataUrl?: string
+): Promise<{ success: boolean; messageId?: string; error?: string }> {
+  const sock = activeSockets.get(lineaId);
+  if (!sock) {
+    return { success: false, error: `La línea ${lineaId} no está conectada activamente.` };
+  }
+
+  try {
+    const cleanDigits = toPhone.replace(/[^\d]/g, '');
+    const jid = `${cleanDigits}@s.whatsapp.net`;
+
+    let sentMsg;
+    if (mediaDataUrl && mediaDataUrl.startsWith('data:image/')) {
+      const base64Data = mediaDataUrl.split(',')[1];
+      const buffer = Buffer.from(base64Data, 'base64');
+      sentMsg = await sock.sendMessage(jid, {
+        image: buffer,
+        caption: text,
+      });
+    } else {
+      sentMsg = await sock.sendMessage(jid, { text });
+    }
+
+    const messageId = sentMsg?.key.id || `msg_${Date.now()}`;
+    const myPhone = sock.user?.id ? `+${sock.user.id.split(':')[0]}` : '+584140000000';
+
+    await saveMessageToFirestore({
+      id: messageId,
+      lineaId,
+      remitenteTelefono: myPhone,
+      destinatarioTelefono: `+${cleanDigits}`,
+      direccion: 'SALIENTE',
+      texto: text,
+      timestamp: Date.now(),
+      estado: 'ENVIADO',
+      tipoMensaje: mediaDataUrl ? 'IMAGEN' : 'TEXTO',
+      mediaUrl: mediaDataUrl,
+    });
+
+    return { success: true, messageId };
+  } catch (err: any) {
+    console.error('[WhatsApp Bridge] Error al enviar mensaje:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Desconecta la sesión de WhatsApp y limpia los archivos de sesión
+ */
+export async function disconnectWhatsAppLineHandler(lineaId: string): Promise<{ success: boolean }> {
+  const sock = activeSockets.get(lineaId);
+  if (sock) {
+    try {
+      await sock.logout();
+    } catch {
+      sock.end(undefined);
+    }
+    activeSockets.delete(lineaId);
+  }
+
+  const sessionDir = getSessionDir(lineaId);
+  try {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
+
+  const state: WhatsAppQrBridgeStatus = {
     lineaId,
-    estado: 'ESPERANDO_QR',
+    estado: 'DESCONECTADO',
     uptimeSeconds: 0,
   };
+  activeLinesState.set(lineaId, state);
+  await syncLineToFirestore(lineaId, {
+    estado: 'DESCONECTADO',
+    numeroConectado: undefined,
+    qrCodeDataUri: undefined,
+  });
 
-  current.estado = 'ESPERANDO_QR';
-  current.qrCodeDataUri = qrDataUri;
-  activeLinesState.set(lineaId, current);
-
-  return { qrDataUri };
+  return { success: true };
 }
 
+/**
+ * Confirmar emparejamiento manual (compatibilidad)
+ */
 export async function confirmPairingHandler(lineaId: string, phone: string): Promise<WhatsAppQrBridgeStatus> {
   const current = activeLinesState.get(lineaId) || {
     lineaId,
     estado: 'CONECTADO',
     uptimeSeconds: 0,
   };
-
   current.estado = 'CONECTADO';
   current.numeroConectado = phone || '+584141234567';
   current.qrCodeDataUri = undefined;
-  current.uptimeSeconds = 1;
   activeLinesState.set(lineaId, current);
-
+  await syncLineToFirestore(lineaId, current);
   return current;
 }
