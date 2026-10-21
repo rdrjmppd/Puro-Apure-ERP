@@ -65,9 +65,10 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
   const [lines, setLines] = useState<WhatsAppLine[]>([]);
   const [activeLineId, setActiveLineId] = useState<string>('linea_cobranzas');
   const [showQrModal, setShowQrModal] = useState<boolean>(false);
-  const [pairingPhone, setPairingPhone] = useState<string>('');
-  const [qrDataUri, setQrDataUri] = useState<string | null>(null);
   const [isGeneratingQr, setIsGeneratingQr] = useState<boolean>(false);
+  const [isDisconnecting, setIsDisconnecting] = useState<boolean>(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [qrDataUri, setQrDataUri] = useState<string | null>(null);
   const [isHybridMode, setIsHybridMode] = useState<boolean>(false);
 
   // 2. Estado de Directorio y Chats
@@ -213,15 +214,23 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     };
   }, [activeLineId, selectedContactPhone]);
 
-  // Enviar mensaje
+    // Enviar mensaje
   const handleSendMessage = async (textToSend?: string) => {
     const text = (textToSend || messageInput).trim();
     if (!text || !selectedContactPhone || isSending) return;
 
+    if (!activeLine || activeLine.estado !== 'CONECTADO') {
+      setErrorMessage(
+        'La línea de WhatsApp no está conectada. Por favor escanee el código QR para vincular su cuenta.'
+      );
+      return;
+    }
+
     setIsSending(true);
+    setErrorMessage(null);
     const res = await WhatsAppCloneService.sendWhatsAppMessage(
       activeLineId,
-      activeLine?.numeroTelefono || '+584140000001',
+      activeLine.numeroTelefono || '',
       selectedContactPhone,
       text,
       'TEXTO'
@@ -233,6 +242,8 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
       setTimeout(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
       }, 100);
+    } else if (res.error) {
+      setErrorMessage(res.error);
     }
   };
 
@@ -241,18 +252,28 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     const file = e.target.files?.[0];
     if (!file || !selectedContactPhone) return;
 
+    if (!activeLine || activeLine.estado !== 'CONECTADO') {
+      setErrorMessage(
+        'La línea de WhatsApp no está conectada. Por favor escanee el código QR para vincular su cuenta.'
+      );
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = async () => {
       const dataUri = reader.result as string;
-      await WhatsAppCloneService.sendWhatsAppMessage(
+      const res = await WhatsAppCloneService.sendWhatsAppMessage(
         activeLineId,
-        activeLine?.numeroTelefono || '+584140000001',
+        activeLine.numeroTelefono || '',
         selectedContactPhone,
         `[Adjunto: ${file.name}]`,
         'IMAGEN',
         dataUri,
         file.type
       );
+      if (!res.success && res.error) {
+        setErrorMessage(res.error);
+      }
     };
     reader.readAsDataURL(file);
     e.target.value = '';
@@ -265,10 +286,10 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     let isMounted = true;
     const fetchStatusAndQr = async () => {
       try {
-        const res = await fetch(`/api/whatsapp/qr?lineaId=${activeLineId}`).then((r) => r.json());
+        const res = await WhatsAppCloneService.getLineLiveStatus(activeLineId);
         if (isMounted && res.success) {
-          if (res.qrDataUri) {
-            setQrDataUri(res.qrDataUri);
+          if (res.qrCodeDataUri) {
+            setQrDataUri(res.qrCodeDataUri);
           }
           if (res.estado === 'CONECTADO') {
             setShowQrModal(false);
@@ -284,7 +305,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     };
 
     fetchStatusAndQr();
-    const interval = setInterval(fetchStatusAndQr, 3500);
+    const interval = setInterval(fetchStatusAndQr, 3000);
     return () => {
       isMounted = false;
       clearInterval(interval);
@@ -292,17 +313,18 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
   }, [showQrModal, activeLineId, activeLine?.qrCodeDataUri]);
 
   // Abrir modal QR y solicitar generación a Baileys
-  const handleOpenQrModal = async () => {
+  const handleOpenQrModal = async (forceNew: boolean = false) => {
     setIsGeneratingQr(true);
     setShowQrModal(true);
-    setQrDataUri(activeLine?.qrCodeDataUri || null);
+    setErrorMessage(null);
+    setQrDataUri(forceNew ? null : (activeLine?.qrCodeDataUri || null));
     try {
-      const res = await fetch(`/api/whatsapp/qr?lineaId=${activeLineId}`).then((r) => r.json());
-      if (res.success && res.qrDataUri) {
-        setQrDataUri(res.qrDataUri);
+      const res = await WhatsAppCloneService.requestQrCode(activeLineId, forceNew);
+      if (res.success && (res.qrCodeDataUri || res.qrDataUri)) {
+        setQrDataUri(res.qrCodeDataUri || res.qrDataUri || null);
       }
     } catch {
-      if (activeLine?.qrCodeDataUri) {
+      if (!forceNew && activeLine?.qrCodeDataUri) {
         setQrDataUri(activeLine.qrCodeDataUri);
       }
     } finally {
@@ -312,26 +334,21 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
 
   // Desvincular línea
   const handleDisconnectLine = async () => {
+    setIsDisconnecting(true);
+    setErrorMessage(null);
     try {
-      await fetch('/api/whatsapp/disconnect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lineaId: activeLineId }),
-      });
-      await WhatsAppCloneService.updateLineStatus(activeLineId, 'DESCONECTADO');
-      setShowQrModal(false);
-      setQrDataUri(null);
-    } catch (err) {
-      console.error('Error al desvincular:', err);
+      const res = await WhatsAppCloneService.disconnectLine(activeLineId);
+      if (res.success) {
+        setQrDataUri(null);
+        await handleOpenQrModal(true);
+      } else {
+        setErrorMessage(res.error || 'No se pudo desvincular la línea');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error al desvincular');
+    } finally {
+      setIsDisconnecting(false);
     }
-  };
-
-  // Confirmar vinculación QR simulada
-  const handleConfirmPairing = async () => {
-    const phone = pairingPhone.trim() || activeLine?.numeroTelefono || '+584149998877';
-    await WhatsAppCloneService.updateLineStatus(activeLineId, 'CONECTADO');
-    setShowQrModal(false);
-    setQrDataUri(null);
   };
 
   // Aplicar plantilla seleccionada
@@ -401,7 +418,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
 
           {/* Botón Escanear QR */}
           <button
-            onClick={handleOpenQrModal}
+            onClick={() => handleOpenQrModal(false)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition min-h-[44px] cursor-pointer"
             title="Vincular o Reconectar sesión mediante Código QR"
           >
@@ -724,6 +741,33 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                 <div ref={messagesEndRef} />
               </div>
 
+              {/* Banner de Advertencia si la línea no está conectada */}
+              {activeLine?.estado !== 'CONECTADO' && (
+                <div className="px-3 py-2 bg-amber-950/40 border-t border-amber-500/30 flex items-center justify-between text-xs text-amber-300">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>Línea <strong>{activeLine?.nombre || 'de WhatsApp'}</strong> no vinculada. Vincule WhatsApp para enviar mensajes en vivo.</span>
+                  </div>
+                  <button
+                    onClick={() => handleOpenQrModal(false)}
+                    className="underline hover:text-white font-bold cursor-pointer shrink-0 ml-2"
+                  >
+                    Vincular QR
+                  </button>
+                </div>
+              )}
+
+              {/* Banner de Error temporal */}
+              {errorMessage && (
+                <div className="px-3 py-2 bg-rose-950/60 border-t border-rose-500/40 flex items-center justify-between text-xs text-rose-300">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                    <span>{errorMessage}</span>
+                  </div>
+                  <button onClick={() => setErrorMessage(null)} className="text-rose-400 hover:text-white ml-2 text-sm">✕</button>
+                </div>
+              )}
+
               {/* Barra Inferior de Entrada y Envío */}
               <div className="p-3 border-t border-slate-800 bg-slate-900/80 flex items-center gap-2">
                 {/* Botón Adjuntar */}
@@ -924,55 +968,93 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
               Abra WhatsApp en su teléfono &gt; Dispositivos vinculados &gt; Vincular un dispositivo.
             </p>
 
-            {activeLine?.estado === 'CONECTADO' ? (
+            {activeLine?.estado === 'CONECTADO' && activeLine.numeroTelefono ? (
               <div className="p-4 rounded-2xl bg-emerald-950/40 border border-emerald-500/40 text-center space-y-3">
                 <div className="w-12 h-12 mx-auto rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
                   <ShieldCheck className="w-6 h-6" />
                 </div>
                 <div>
                   <h4 className="text-xs font-bold text-emerald-300">Línea Conectada en Vivo</h4>
-                  <p className="text-xs text-slate-400 mt-1 font-mono">{activeLine.numeroTelefono}</p>
+                  <p className="text-xs text-slate-200 mt-1 font-mono font-bold">{activeLine.numeroTelefono}</p>
                 </div>
+
+                {errorMessage && (
+                  <div className="p-2 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-300 text-left">
+                    {errorMessage}
+                  </div>
+                )}
+
                 <button
                   onClick={handleDisconnectLine}
-                  className="w-full py-2 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-bold transition cursor-pointer min-h-[44px]"
+                  disabled={isDisconnecting}
+                  className="w-full py-2.5 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-bold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 disabled:opacity-50"
                 >
-                  Desvincular y Cerrar Sesión
+                  {isDisconnecting ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin text-rose-400" />
+                      <span>Desvinculando y cerrando sesión...</span>
+                    </>
+                  ) : (
+                    <span>Desvincular y Cerrar Sesión</span>
+                  )}
                 </button>
               </div>
             ) : (
               <>
-                <div className="bg-white p-3 rounded-2xl mx-auto w-56 h-56 flex flex-col items-center justify-center border-4 border-emerald-600 shadow-2xl relative">
-                  {isGeneratingQr ? (
-                    <div className="flex flex-col items-center gap-2 text-emerald-700">
-                      <RefreshCw className="w-8 h-8 animate-spin" />
-                      <span className="text-[10px] font-semibold">Generando QR auténtico...</span>
-                    </div>
-                  ) : (qrDataUri || activeLine?.qrCodeDataUri) ? (
-                    <img
-                      src={qrDataUri || activeLine?.qrCodeDataUri}
-                      alt="Código QR WhatsApp Auténtico"
-                      className="w-full h-full object-contain"
-                    />
-                  ) : (
-                    <div className="flex flex-col items-center gap-2 text-slate-600">
-                      <QrCode className="w-16 h-16" />
-                      <span className="text-[10px]">Conectando a WhatsApp...</span>
-                    </div>
-                  )}
-                </div>
+                {errorMessage && (
+                  <div className="p-2.5 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-300 text-left">
+                    {errorMessage}
+                  </div>
+                )}
+
+                {activeLine?.estado === 'QR_EXPIRADO' ? (
+                  <div className="p-4 rounded-2xl bg-amber-950/40 border border-amber-500/40 text-center space-y-3">
+                    <p className="text-xs text-amber-300 font-semibold">
+                      El código QR expiró por inactividad para proteger la pasarela de WhatsApp.
+                    </p>
+                    <button
+                      onClick={() => handleOpenQrModal(true)}
+                      disabled={isGeneratingQr}
+                      className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-4 h-4 text-white ${isGeneratingQr ? 'animate-spin' : ''}`} />
+                      <span>Generar Nuevo Código QR</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="bg-white p-3 rounded-2xl mx-auto w-56 h-56 flex flex-col items-center justify-center border-4 border-emerald-600 shadow-2xl relative">
+                    {isGeneratingQr ? (
+                      <div className="flex flex-col items-center gap-2 text-emerald-700">
+                        <RefreshCw className="w-8 h-8 animate-spin" />
+                        <span className="text-[10px] font-semibold">Generando QR auténtico...</span>
+                      </div>
+                    ) : (qrDataUri || activeLine?.qrCodeDataUri) ? (
+                      <img
+                        src={qrDataUri || activeLine?.qrCodeDataUri}
+                        alt="Código QR WhatsApp Auténtico"
+                        className="w-full h-full object-contain"
+                      />
+                    ) : (
+                      <div className="flex flex-col items-center gap-2 text-slate-600">
+                        <QrCode className="w-16 h-16 animate-pulse text-emerald-600" />
+                        <span className="text-[10px] font-medium">Obteniendo apretón de manos QR...</span>
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="flex items-center justify-center gap-2 text-[11px] text-slate-400">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                  <span>Código de apretón de manos Noise Protocol en vivo</span>
+                  <span>Apretón de manos Noise Protocol autenticado con Baileys</span>
                 </div>
 
                 <div className="space-y-2 pt-1">
                   <button
-                    onClick={handleOpenQrModal}
-                    className="w-full py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2"
+                    onClick={() => handleOpenQrModal(true)}
+                    disabled={isGeneratingQr}
+                    className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 disabled:opacity-50"
                   >
-                    <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
+                    <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isGeneratingQr ? 'animate-spin' : ''}`} />
                     <span>Refrescar Código QR</span>
                   </button>
                 </div>

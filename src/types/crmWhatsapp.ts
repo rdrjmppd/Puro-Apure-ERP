@@ -4,7 +4,12 @@
  */
 
 export type WhatsAppLineType = 'COBRANZAS' | 'VENTAS' | 'PROVEEDORES_BRM';
-export type WhatsAppConnectionStatus = 'CONECTADO' | 'ESPERANDO_QR' | 'DESCONECTADO' | 'ERROR';
+export type WhatsAppConnectionStatus =
+  | 'CONECTADO'
+  | 'ESPERANDO_QR'
+  | 'DESCONECTADO'
+  | 'QR_EXPIRADO'
+  | 'ERROR';
 export type WhatsAppMessageDirection = 'ENTRANTE' | 'SALIENTE';
 export type WhatsAppMessageStatus = 'ENVIADO' | 'ENTREGADO' | 'LEIDO' | 'FALLIDO';
 export type WhatsAppMessageType = 'TEXTO' | 'IMAGEN' | 'DOCUMENTO_PDF';
@@ -13,9 +18,11 @@ export interface WhatsAppLine {
   id: string; // ej. 'linea_cobranzas', 'linea_ventas', 'linea_brm'
   nombre: string;
   tipo: WhatsAppLineType;
-  numeroTelefono: string; // Formato E.164: +58...
+  numeroTelefono?: string; // Formato E.164: +58... o vacío si desconectado
   estado: WhatsAppConnectionStatus;
   qrCodeDataUri?: string;
+  qrExpiresAt?: number;
+  qrRotations?: number;
   lastActivityTimestamp: number;
   isOnline: boolean;
   metadata?: Record<string, unknown>;
@@ -52,24 +59,31 @@ export interface WhatsAppTemplate {
   id: string;
   nombre: string;
   categoria: WhatsAppTemplateCategory;
-  textoPlantilla: string; // Contiene {cliente}, {factura}, {monto_usd}, {monto_ves}, {fecha_vencimiento}
+  textoPlantilla: string;
   variablesRequeridas: string[];
   activo: boolean;
 }
 
 export interface WhatsAppChatContact {
+  id?: string;
+  nombre?: string;
+  telefono?: string;
+  tipo?: 'CLIENTE' | 'PROVEEDOR' | 'ROL_DUAL';
+  saldoPendienteUSD?: number;
+  saldoPendienteVES?: number;
+  facturasPendientesCount?: number;
+  diasMoraMax?: number;
+  ultimoMensaje?: WhatsAppMessage;
+
+  // Propiedades enriquecidas de ERP
   telefonoE164: string;
   nombreDisplay: string;
-  ultimoMensaje?: WhatsAppMessage;
-  mensajesNoLeidos: number;
-  avatarUrl?: string;
-  // Cruce de Directorio ERP
+  mensajesNoLeidos?: number;
   entityId?: string;
   entityRole?: 'CLIENTE' | 'PROVEEDOR' | 'DUAL' | 'LEAD';
   estadoSolvencia?: 'SOLVENTE' | 'EN_MORA' | 'SIN_DEUDA';
   deudaTotalUSD?: number;
-  deudaTotalVES?: number;
   limiteCreditoUSD?: number;
-  cuentasPorPagarUSD?: number; // Para BRM o Rol Dual
+  cuentasPorPagarUSD?: number;
   saldoNetoCompensadoUSD?: number;
 }

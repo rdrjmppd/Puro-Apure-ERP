@@ -13,6 +13,7 @@ import {
   confirmPairingHandler,
   sendWhatsAppMessageHandler,
   disconnectWhatsAppLineHandler,
+  verifyAuthToken,
 } from './server/whatsappQrBridge';
 
 function bcvServerProxyPlugin(): Plugin {
@@ -210,8 +211,9 @@ function bcvServerProxyPlugin(): Plugin {
       server.middlewares.use('/api/fetchBCVRate', handleRateRequest);
       server.middlewares.use('/api/sync-bcv', handleRateRequest);
 
-      // WhatsApp QR Bridge Middlewares
+      // WhatsApp QR Bridge Middlewares (DevSecOps Protegidos con Caché No-Store)
       server.middlewares.use('/api/whatsapp/status', async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
         const reqUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost:3000'}`);
         const lineaId = reqUrl.searchParams.get('lineaId') || 'linea_cobranzas';
         const status = await getWhatsAppLineStatusHandler(lineaId);
@@ -220,20 +222,34 @@ function bcvServerProxyPlugin(): Plugin {
       });
 
       server.middlewares.use('/api/whatsapp/qr', async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
         const reqUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost:3000'}`);
         const lineaId = reqUrl.searchParams.get('lineaId') || 'linea_cobranzas';
-        const qr = await generateQrCodeHandler(lineaId);
+        const forceNew = reqUrl.searchParams.get('force') === 'true';
+        const qr = await generateQrCodeHandler(lineaId, forceNew);
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true, ...qr }));
       });
 
-            server.middlewares.use('/api/whatsapp/send', async (req: any, res: any) => {
+      server.middlewares.use('/api/whatsapp/send', async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
         if (req.method !== 'POST') {
           res.statusCode = 405;
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ success: false, error: 'Method Not Allowed' }));
           return;
         }
+
+        // Validación DevSecOps de autorización Bearer
+        const authHeader = req.headers['authorization'] || '';
+        const auth = await verifyAuthToken(authHeader);
+        if (!auth.authorized) {
+          res.statusCode = 401;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: auth.error }));
+          return;
+        }
+
         let body = '';
         req.on('data', (chunk: any) => (body += chunk));
         req.on('end', async () => {
@@ -256,6 +272,24 @@ function bcvServerProxyPlugin(): Plugin {
       });
 
       server.middlewares.use('/api/whatsapp/disconnect', async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        if (req.method !== 'POST') {
+          res.statusCode = 405;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: 'Method Not Allowed' }));
+          return;
+        }
+
+        // Validación DevSecOps de autorización Bearer
+        const authHeader = req.headers['authorization'] || '';
+        const auth = await verifyAuthToken(authHeader);
+        if (!auth.authorized) {
+          res.statusCode = 401;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: auth.error }));
+          return;
+        }
+
         let body = '';
         req.on('data', (chunk: any) => (body += chunk));
         req.on('end', async () => {
@@ -273,20 +307,12 @@ function bcvServerProxyPlugin(): Plugin {
       });
 
       server.middlewares.use('/api/whatsapp/pair', async (req: any, res: any) => {
-        let body = '';
-        req.on('data', (chunk: any) => (body += chunk));
-        req.on('end', async () => {
-          try {
-            const parsed = body ? JSON.parse(body) : {};
-            const result = await confirmPairingHandler(parsed.lineaId || 'linea_cobranzas', parsed.phone || '');
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ success: true, ...result }));
-          } catch (e: any) {
-            res.statusCode = 400;
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ success: false, error: e.message }));
-          }
-        });
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        const reqUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost:3000'}`);
+        const lineaId = reqUrl.searchParams.get('lineaId') || 'linea_cobranzas';
+        const result = await confirmPairingHandler(lineaId);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true, ...result }));
       });
     },
   };
@@ -309,7 +335,7 @@ export default defineConfig(() => {
             {
               // Aislamiento dinámico de APIs (Mitigación VEC-PWA-03): Red con respaldo de caché
               // (excluye chat en vivo y endpoints de branding para no servir logotipos obsoletos)
-              urlPattern: /\/api\/(?!askGeminiAssistant|getBranding|uploadLogo|resetLogo).*/i,
+              urlPattern: /\/api\/(?!askGeminiAssistant|getBranding|uploadLogo|resetLogo|whatsapp).*/i,
               handler: 'NetworkFirst',
               options: {
                 cacheName: 'api-dynamic-cache',

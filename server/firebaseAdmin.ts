@@ -36,6 +36,11 @@ export const adminApp =
 export const adminAuth = getAuth(adminApp);
 export const adminDb = getFirestore(adminApp);
 
+// Configuración DevSecOps: ignorar propiedades undefined en escrituras del servidor
+adminDb.settings({ ignoreUndefinedProperties: true });
+
+export { FieldValue };
+
 // Fachada administrativa universal para endpoints y handlers del servidor
 export const admin = {
   app: adminApp,

@@ -8,7 +8,6 @@ import {
   collection,
   doc,
   getDocs,
-  getDoc,
   setDoc,
   updateDoc,
   query,
@@ -17,14 +16,13 @@ import {
   limit,
   onSnapshot,
 } from 'firebase/firestore';
-import { db } from '../firebase/config';
+import { db, auth } from '../firebase/config';
 import { offlineSyncEngine } from './offlineSyncEngine';
 import {
   WhatsAppLine,
   WhatsAppMessage,
   WhatsAppTemplate,
   WhatsAppChatContact,
-  WhatsAppLineType,
 } from '../types/crmWhatsapp';
 import { DualEntity } from '../types/finance';
 
@@ -38,24 +36,20 @@ const TEMPLATES_COLLECTION = 'whatsapp_plantillas';
  */
 export function normalizeToE164(phone: string): string {
   if (!phone) return '';
-  // Eliminar espacios, guiones, paréntesis y caracteres no numéricos excepto el '+'
   let clean = phone.replace(/[^\d+]/g, '');
 
   if (clean.startsWith('+')) {
     return clean;
   }
 
-  // Si empieza con 0 (ej. 0414...), reemplazar 0 por +58
   if (clean.startsWith('0')) {
     return `+58${clean.substring(1)}`;
   }
 
-  // Si ya tiene código de país 58 sin '+'
   if (clean.startsWith('58')) {
     return `+${clean}`;
   }
 
-  // Por defecto asumir código venezolano +58
   return `+58${clean}`;
 }
 
@@ -112,7 +106,7 @@ export const DEFAULT_WHATSAPP_TEMPLATES: Omit<WhatsAppTemplate, 'id'>[] = [
 
 export class WhatsAppCloneService {
   /**
-   * Inicializa las 3 líneas operativas base si no existen en Firestore
+   * Inicializa las 3 líneas operativas base sin datos ficticios (Cero Mock Data)
    */
   static async initializeDefaultLines(): Promise<WhatsAppLine[]> {
     const defaultLines: WhatsAppLine[] = [
@@ -120,28 +114,28 @@ export class WhatsAppCloneService {
         id: 'linea_cobranzas',
         nombre: 'Línea de Crédito y Cobranzas',
         tipo: 'COBRANZAS',
-        numeroTelefono: '+584140000001',
-        estado: 'CONECTADO',
+        numeroTelefono: '',
+        estado: 'DESCONECTADO',
         lastActivityTimestamp: Date.now(),
-        isOnline: true,
+        isOnline: false,
       },
       {
         id: 'linea_ventas',
         nombre: 'Línea de Ventas y Despacho',
         tipo: 'VENTAS',
-        numeroTelefono: '+584140000002',
-        estado: 'CONECTADO',
+        numeroTelefono: '',
+        estado: 'DESCONECTADO',
         lastActivityTimestamp: Date.now(),
-        isOnline: true,
+        isOnline: false,
       },
       {
         id: 'linea_brm',
         nombre: 'Línea de Proveedores y BRM',
         tipo: 'PROVEEDORES_BRM',
-        numeroTelefono: '+584140000003',
-        estado: 'CONECTADO',
+        numeroTelefono: '',
+        estado: 'DESCONECTADO',
         lastActivityTimestamp: Date.now(),
-        isOnline: true,
+        isOnline: false,
       },
     ];
 
@@ -153,7 +147,21 @@ export class WhatsAppCloneService {
         }
         return defaultLines;
       }
-      return snap.docs.map((d) => d.data() as WhatsAppLine);
+
+      // Saneamiento DevSecOps: Si algún doc en Firestore tiene números ficticios heredados, sanearlos
+      const lines = snap.docs.map((d) => {
+        const data = d.data() as WhatsAppLine;
+        if (data.numeroTelefono && data.numeroTelefono.includes('58414000000')) {
+          return {
+            ...data,
+            numeroTelefono: '',
+            estado: (data.estado === 'CONECTADO' ? 'DESCONECTADO' : data.estado) as WhatsAppLine['estado'],
+            isOnline: false,
+          };
+        }
+        return data;
+      });
+      return lines;
     } catch {
       return defaultLines;
     }
@@ -167,7 +175,18 @@ export class WhatsAppCloneService {
     return onSnapshot(
       q,
       (snapshot) => {
-        const lines = snapshot.docs.map((d) => d.data() as WhatsAppLine);
+        const lines = snapshot.docs.map((d) => {
+          const data = d.data() as WhatsAppLine;
+          if (data.numeroTelefono && data.numeroTelefono.includes('58414000000')) {
+            return {
+              ...data,
+              numeroTelefono: '',
+              estado: (data.estado === 'CONECTADO' ? 'DESCONECTADO' : data.estado) as WhatsAppLine['estado'],
+              isOnline: false,
+            };
+          }
+          return data;
+        });
         callback(lines);
       },
       (err) => {
@@ -177,7 +196,7 @@ export class WhatsAppCloneService {
   }
 
   /**
-   * Actualiza el estado de una línea (ej. al escanear QR o reconectar)
+   * Actualiza el estado de una línea
    */
   static async updateLineStatus(
     lineaId: string,
@@ -196,6 +215,80 @@ export class WhatsAppCloneService {
     } catch (err) {
       console.error('[WhatsAppCloneService] Error actualizando estado de línea:', err);
       return false;
+    }
+  }
+
+  /**
+   * Consulta el estado en vivo del puente de servidor
+   */
+  static async getLineLiveStatus(lineaId: string): Promise<{
+    success: boolean;
+    estado: WhatsAppLine['estado'];
+    numeroConectado?: string;
+    qrCodeDataUri?: string;
+    lastError?: string;
+  }> {
+    try {
+      const res = await fetch(`/api/whatsapp/status?lineaId=${lineaId}`, {
+        cache: 'no-store',
+      }).then((r) => r.json());
+      return res;
+    } catch (err: any) {
+      return { success: false, estado: 'DESCONECTADO', lastError: err.message };
+    }
+  }
+
+  /**
+   * Solicita la generación de un código QR auténtico al servidor
+   */
+  static async requestQrCode(
+    lineaId: string,
+    forceNew: boolean = false
+  ): Promise<{
+    success: boolean;
+    estado: WhatsAppLine['estado'];
+    qrCodeDataUri?: string;
+    qrDataUri?: string;
+    lastError?: string;
+  }> {
+    try {
+      const res = await fetch(
+        `/api/whatsapp/qr?lineaId=${lineaId}${forceNew ? '&force=true' : ''}`,
+        { cache: 'no-store' }
+      ).then((r) => r.json());
+      return res;
+    } catch (err: any) {
+      return { success: false, estado: 'ERROR', lastError: err.message };
+    }
+  }
+
+  /**
+   * Desvincula la línea y cierra la sesión tanto en el socket como en Firestore
+   */
+  static async disconnectLine(lineaId: string): Promise<{ success: boolean; error?: string }> {
+    try {
+      const currentUser = auth.currentUser;
+      const token = currentUser ? await currentUser.getIdToken() : '';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const res = await fetch('/api/whatsapp/disconnect', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ lineaId }),
+      }).then((r) => r.json());
+
+      if (!res.success) {
+        return { success: false, error: res.error || 'Error al desvincular' };
+      }
+
+      await this.updateLineStatus(lineaId, 'DESCONECTADO');
+      return { success: true };
+    } catch (err: any) {
+      console.error('[WhatsAppCloneService] Error al desvincular línea:', err);
+      return { success: false, error: err.message };
     }
   }
 
@@ -219,7 +312,6 @@ export class WhatsAppCloneService {
       q,
       (snapshot) => {
         const all = snapshot.docs.map((d) => d.data() as WhatsAppMessage);
-        // Filtrar en memoria para permitir mensajes bidireccionales con este contacto
         const chatMsgs = all.filter(
           (m) =>
             m.remitenteTelefono === normPhone ||
@@ -234,8 +326,7 @@ export class WhatsAppCloneService {
   }
 
   /**
-   * Envía un mensaje en el Clon de WhatsApp Web (soporta texto, imágenes o PDFs)
-   * Idempotencia estricta por whatsappMessageId.
+   * Envía un mensaje en el Clon de WhatsApp Web con autorización Bearer
    */
   static async sendWhatsAppMessage(
     lineaId: string,
@@ -269,22 +360,23 @@ export class WhatsAppCloneService {
     };
 
     try {
-      // 1. Intentar entrega en vivo a través de la pasarela Baileys si el servidor local está activo
-      try {
-        if (typeof window !== 'undefined') {
-          fetch('/api/whatsapp/send', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              lineaId,
-              toPhone: destNorm,
-              text: texto,
-              mediaDataUrl: mediaUrl,
-            }),
-          }).catch(() => {});
-        }
-      } catch {
-        // En entorno cloud o desconectado, continuar con persistencia
+      // Entrega a través de la pasarela de servidor con autorización
+      if (typeof window !== 'undefined') {
+        const currentUser = auth.currentUser;
+        const token = currentUser ? await currentUser.getIdToken() : '';
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+
+        fetch('/api/whatsapp/send', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            lineaId,
+            toPhone: destNorm,
+            text: texto,
+            mediaDataUrl: mediaUrl,
+          }),
+        }).catch(() => {});
       }
 
       const docRef = doc(db, MESSAGES_COLLECTION, msgId);
@@ -296,7 +388,6 @@ export class WhatsAppCloneService {
         await setDoc(docRef, message);
       }
 
-      // Simular cambio a 'ENTREGADO' tras breve confirmación de red
       setTimeout(() => {
         updateDoc(docRef, { estado: 'ENTREGADO' }).catch(() => {});
       }, 800);
@@ -309,7 +400,7 @@ export class WhatsAppCloneService {
   }
 
   /**
-   * Registra un mensaje entrante simulado o recibido por webhook/socket
+   * Registra un mensaje entrante
    */
   static async receiveIncomingMessage(
     lineaId: string,
@@ -357,7 +448,6 @@ export class WhatsAppCloneService {
     try {
       const snap = await getDocs(collection(db, TEMPLATES_COLLECTION));
       if (snap.empty) {
-        // Cargar plantillas por defecto si no existen
         const created: WhatsAppTemplate[] = [];
         for (let i = 0; i < DEFAULT_WHATSAPP_TEMPLATES.length; i++) {
           const tpl = {
@@ -376,7 +466,7 @@ export class WhatsAppCloneService {
   }
 
   /**
-   * Renderiza una plantilla sustituyendo sus variables de forma determinista
+   * Renderiza una plantilla sustituyendo sus variables
    */
   static renderTemplate(
     templateText: string,
@@ -403,8 +493,7 @@ export class WhatsAppCloneService {
   }
 
   /**
-   * Cruza un número de teléfono con el directorio ERP de Dual Entities para
-   * enriquecer el contacto con su estado de solvencia, deuda y rol.
+   * Cruza un número de teléfono con el directorio ERP
    */
   static enrichContactWithERP(
     phone: string,
@@ -437,7 +526,6 @@ export class WhatsAppCloneService {
       };
     }
 
-    // Contacto no registrado en directorio ERP (Prospecto o Lead)
     return {
       telefonoE164: normPhone,
       nombreDisplay: normPhone,
@@ -450,7 +538,7 @@ export class WhatsAppCloneService {
   }
 
   /**
-   * Genera el enlace directo oficial wa.me para modo híbrido (Mobile & Fallback)
+   * Genera el enlace directo oficial wa.me para modo híbrido
    */
   static generateWaMeLink(phone: string, messageText?: string): string {
     const cleanDigits = phone.replace(/[^\d]/g, '');

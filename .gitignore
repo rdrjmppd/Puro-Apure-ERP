@@ -8,3 +8,4 @@ coverage/
 !.env.example
 .whatsapp_sessions/
 serviceAccountKey.json
+scratch/
