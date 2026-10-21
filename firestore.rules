@@ -368,5 +368,16 @@ service cloud.firestore {
       allow update: if isAdmin();
       allow delete: if isSuperAdmin();
     }
+
+    // ==========================================
+    // 12. Gastos Operativos (@Finanzas)
+    // ==========================================
+    match /gastos_operativos/{expenseId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidId(expenseId)
+        && request.resource.data.montoUSD is number && request.resource.data.montoUSD > 0;
+      allow delete: if isSuperAdmin();
+    }
   }
 }
+

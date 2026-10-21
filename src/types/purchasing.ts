@@ -153,3 +153,85 @@ export interface StartupAlertDigest {
   tieneAlertasCriticas: boolean;
   tieneAlertasModeradas: boolean;
 }
+
+// ============================================================================
+// 5. GASTOS OPERATIVOS, MATERIALES, EQUIPOS E HISTÓRICO RETROACTIVO (gastos_operativos/{id})
+// ============================================================================
+
+export type GastoTipoRegistro = 'OPERATIVO_ACTUAL' | 'HISTORICO_RETROACTIVO';
+
+export type GastoCategoria =
+  | 'CONSTRUCCION_INFRAESTRUCTURA' // Materiales de construcción, tuberías, mallas, pintura, cemento
+  | 'EQUIPOS_TECNOLOGIA'          // Computadoras, UPS, routers, cables, impresoras, switches
+  | 'PAPELERIA_OFICINA'           // Papel, bolígrafos, carpetas, suministros administrativos
+  | 'HERRAMIENTAS_OPERATIVAS'     // Taladros, bombas auxiliares, herramientas de mano, discos
+  | 'MANTENIMIENTO_SERVICIOS'     // Reparaciones mecánicas, plomería, electricidad, servicios técnicos
+  | 'PAGO_PROVEEDORES_HISTORICO'  // Pagos pasados a proveedores de insumos o servicios
+  | 'PAGO_EMPLEADOS_MANO_OBRA'    // Pagos pasados a personal, jornales, cuadrillas o nómina
+  | 'GASTOS_OPERATIVOS_GENERALES';// Consumibles diarios, aseo, logística y misceláneos
+
+export type GastoNaturaleza = 'OPEX' | 'CAPEX';
+
+export type GastoMetodoPago =
+  | 'EFECTIVO_USD'
+  | 'EFECTIVO_VES'
+  | 'PAGO_MOVIL'
+  | 'TRANSFERENCIA_VES'
+  | 'ZELLE'
+  | 'BINANCE_USDT'
+  | 'TRANSFERENCIA_USD';
+
+export interface OperatingExpense {
+  id: string;                      // EXP-YYYYMMDD-XXXXX
+  idempotencyKey: string;
+  tipoRegistro: GastoTipoRegistro; // 'OPERATIVO_ACTUAL' | 'HISTORICO_RETROACTIVO'
+  fecha: string;                   // YYYY-MM-DD (fecha real en que ocurrió el gasto)
+  categoria: GastoCategoria;
+  naturaleza: GastoNaturaleza;     // OPEX vs CAPEX
+  concepto: string;                // Título descriptivo (ej. 'Compra de Router y Cableado Galpón 2')
+  descripcionDetallada: string;   // Descripción exacta, justificación y desglose del gasto
+  
+  // Factura o Comprobante (OPCIONAL en Histórico, obligatorio en Presente si aplica)
+  numeroComprobante?: string;      // Opcional en gastos pasados ('S/F' o número real)
+  tieneComprobanteFisico: boolean;
+  comprobanteUrl?: string;         // Imagen o PDF adjunto opcional
+  
+  // Proveedor o Beneficiario
+  proveedorComercio: string;       // Ferretería, tienda, nombre de empleado o proveedor
+  proveedorRifCedula?: string;
+  proveedorEntityId?: string;      // Enlace opcional a dual_entities (BRM)
+  
+  // Aritmética Bimonetaria Exacta (centsRound)
+  montoUSD: number;                // SSoT: Monto referenciado en Dólares del momento del pago
+  montoVES?: number;               // Monto en Bolívares si se conoce
+  tasaBcv?: number;                // Tasa oficial aplicada en la fecha (opcional en históricos)
+  
+  metodoPago: GastoMetodoPago;
+  cuentaOrigen?: string;           // 'Caja Chica', 'Fondo Histórico', 'Banco Banesco', etc.
+  estadoPago: 'PAGADO' | 'PENDIENTE_REEMBOLSO';
+  
+  // Cruce Opcional con Lotes Históricos
+  loteHistoricoVinculadoId?: string; // Si se desea imputar a un lote de aves/cerdos específico
+  esGastoEstructuralEmpresa: boolean;// Si es un gasto global de la empresa (no atribuible a un solo lote)
+  
+  responsableNombre?: string;      // Quién autorizó o ejecutó el desembolso
+  asientoContableId?: string;      // ID en financial_ledger
+  createdAt: number;
+  updatedAt: number;
+  createdBy: string;
+}
+
+// Resumen del Cruce Histórico Consolidado (Camadas Pasadas vs Gastos Históricos)
+export interface HistoricalConsolidatedPnl {
+  totalIngresosCamadasUSD: number;       // Sumatoria de ingresos de lotes_historicos
+  totalCostosCamadasUSD: number;         // Sumatoria de costos directos de lotes_historicos
+  totalGananciasCamadasUSD: number;      // Sumatoria utilidad neta de lotes_historicos (Aves + Cerdos)
+  totalGastosHistoricosUSD: number;      // Sumatoria de gastos_operativos (HISTORICO_RETROACTIVO)
+  totalGastosOpexUSD: number;            // OPEX acumulado
+  totalGastosCapexUSD: number;           // CAPEX acumulado (activos, tecnología)
+  desgloseGastosPorCategoria: Record<GastoCategoria, number>;
+  utilidadNetaConsolidadaUSD: number;    // Ganancias Camadas - Gastos Históricos
+  margenRentabilidadReal: number;        // (Utilidad Consolidada / Ingresos Camadas) * 100
+  conteoCamadas: number;
+  conteoGastos: number;
+}

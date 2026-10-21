@@ -25,14 +25,15 @@ import { PurchaseInvoiceForm } from './PurchaseInvoiceForm';
 import { SupplierTermsPanel } from './SupplierTermsPanel';
 import { SupplyCriticalLevelsPanel } from './SupplyCriticalLevelsPanel';
 import { SupplierPaymentModal } from './SupplierPaymentModal';
+import { OperatingExpensesView } from './OperatingExpensesView';
 
 interface PurchasesPayablesTabProps {
   userId: string;
   userRole?: string;
-  initialSubTab?: 'FACTURAS' | 'NUEVA_COMPRA' | 'TERMINOS_PROVEEDOR' | 'NIVELES_CRITICOS';
+  initialSubTab?: 'FACTURAS' | 'NUEVA_COMPRA' | 'TERMINOS_PROVEEDOR' | 'NIVELES_CRITICOS' | 'GASTOS_OPERATIVOS';
 }
 
-type SubTab = 'FACTURAS' | 'NUEVA_COMPRA' | 'TERMINOS_PROVEEDOR' | 'NIVELES_CRITICOS';
+type SubTab = 'FACTURAS' | 'NUEVA_COMPRA' | 'TERMINOS_PROVEEDOR' | 'NIVELES_CRITICOS' | 'GASTOS_OPERATIVOS';
 
 export const PurchasesPayablesTab: React.FC<PurchasesPayablesTabProps> = ({
   userId,

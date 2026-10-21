@@ -1414,7 +1414,7 @@ export const FinancialLedger: React.FC = () => {
           }`}
         >
           <Receipt className="w-3.5 h-3.5 text-emerald-400" />
-          <span>Compras &amp; CxP</span>
+          <span>Compras, CxP &amp; Gastos</span>
           <span className="text-[10px] bg-slate-950 px-1.5 py-0.2 rounded text-emerald-300 font-mono">
             Nuevo
           </span>
@@ -1896,12 +1896,12 @@ export const FinancialLedger: React.FC = () => {
       {/* SUB-TAB 6: COMPRAS Y CUENTAS POR PAGAR (CxP) */}
       {/* ==================================================== */}
       {activeTab === 'COMPRAS_CXP' && (
-        <ModuleErrorBoundary moduleName="Compras y Cuentas por Pagar (CxP)">
+        <ModuleErrorBoundary moduleName="Compras, Cuentas por Pagar (CxP) y Gastos">
           <React.Suspense
             fallback={
               <div className="p-12 rounded-3xl bg-slate-900 border border-slate-800 flex flex-col items-center justify-center gap-3 text-slate-400">
                 <RefreshCw className="w-6 h-6 animate-spin text-emerald-400" />
-                <div className="text-xs font-medium">Cargando módulo de Compras y CxP...</div>
+                <div className="text-xs font-medium">Cargando módulo de Compras, CxP y Gastos...</div>
                 <div className="text-[10px] text-slate-500 font-mono">Cuentas por pagar, términos de proveedores y alarmas de insumos</div>
               </div>
             }
