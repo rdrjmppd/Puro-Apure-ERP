@@ -207,9 +207,19 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
       if (seenPhones.has(phone)) continue;
       seenPhones.add(phone);
 
+      const cleanDigits = phone.replace(/\D/g, '');
+      const isLidNumber = cleanDigits.length >= 14;
+      const cleanSender =
+        lastMsg.senderName && lastMsg.senderName !== phone && !lastMsg.senderName.startsWith('+')
+          ? lastMsg.senderName
+          : undefined;
+
+      const displayName =
+        cleanSender || (isLidNumber ? `Contacto WhatsApp (*${cleanDigits.slice(-4)})` : phone);
+
       list.push({
         telefonoE164: phone,
-        nombreDisplay: lastMsg.senderName || phone,
+        nombreDisplay: displayName,
         entityRole: 'LEAD',
         estadoSolvencia: 'SOLVENTE',
         deudaTotalUSD: 0,
@@ -639,6 +649,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                     onClick={() => {
                       setSelectedContactPhone(contact.telefonoE164);
                       setMobileTab('CONVERSACION');
+                      setErrorMessage(null);
                     }}
                     className={`p-3 transition cursor-pointer flex items-start gap-3 min-h-[64px] ${
                       isSelected
@@ -741,7 +752,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                     <h3 className="text-xs font-bold text-white flex items-center gap-2">
                       <span>{selectedContact.nombreDisplay}</span>
                       <span className="text-[10px] font-mono font-normal text-slate-400">
-                        {selectedContact.telefonoE164}
+                        {selectedContact.telefonoE164.replace(/\D/g, '').length >= 14
+                          ? `(WhatsApp ID *${selectedContact.telefonoE164.replace(/\D/g, '').slice(-4)})`
+                          : selectedContact.telefonoE164}
                       </span>
                     </h3>
                     <div className="flex items-center gap-2 text-[10px] text-slate-400">
@@ -927,7 +940,10 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                   type="text"
                   placeholder="Escriba un mensaje (Presione Enter para enviar)..."
                   value={messageInput}
-                  onChange={(e) => setMessageInput(e.target.value)}
+                  onChange={(e) => {
+                    setMessageInput(e.target.value);
+                    if (errorMessage) setErrorMessage(null);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();

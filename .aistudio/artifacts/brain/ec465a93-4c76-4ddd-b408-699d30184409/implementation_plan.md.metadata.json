@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementación y diagnóstico forense detallado para corregir el cierre prematuro del modal de desvinculación de WhatsApp y habilitar la sincronización reactiva en tiempo real de mensajes entrantes en la barra lateral del CRM.",
-  "updatedAt":  "2026-10-21T15:29:13.938760270Z",
+  "summary":  "Informe de auditoría técnica y plan de remediación para resolver la distorsión de números telefónicos por identificadores LID de WhatsApp y el fallo de setDoc con campos undefined al enviar mensajes desde el CRM.",
+  "updatedAt":  "2026-10-21T15:51:57.077832127Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

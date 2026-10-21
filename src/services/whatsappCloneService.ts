@@ -400,11 +400,21 @@ export class WhatsAppCloneService {
       timestamp: now,
       estado: 'ENVIADO',
       tipoMensaje,
-      mediaUrl,
-      mediaMimeType,
       hasComprobantePago: false,
       ocrStatus: 'NO_ANALIZADO',
     };
+
+    if (mediaUrl) {
+      message.mediaUrl = mediaUrl;
+    }
+    if (mediaMimeType) {
+      message.mediaMimeType = mediaMimeType;
+    }
+
+    // Sanitización DevSecOps estricta: eliminar cualquier campo undefined antes de persistir en Firestore
+    const cleanMessage = Object.fromEntries(
+      Object.entries(message).filter(([_, v]) => v !== undefined)
+    ) as WhatsAppMessage;
 
     try {
       // Entrega a través de la pasarela de servidor con autorización
@@ -421,18 +431,18 @@ export class WhatsAppCloneService {
             lineaId,
             toPhone: destNorm,
             text: texto,
-            mediaDataUrl: mediaUrl,
+            mediaDataUrl: mediaUrl || undefined,
           }),
         }).catch(() => {});
       }
 
       const docRef = doc(db, MESSAGES_COLLECTION, msgId);
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        await offlineSyncEngine.enqueueMutation(MESSAGES_COLLECTION, msgId, 'SET', message, {
+        await offlineSyncEngine.enqueueMutation(MESSAGES_COLLECTION, msgId, 'SET', cleanMessage, {
           offline: true,
         });
       } else {
-        await setDoc(docRef, message);
+        await setDoc(docRef, cleanMessage);
       }
 
       setTimeout(() => {
@@ -474,14 +484,23 @@ export class WhatsAppCloneService {
       timestamp: now,
       estado: 'LEIDO',
       tipoMensaje: mediaUrl ? 'IMAGEN' : 'TEXTO',
-      mediaUrl,
-      mediaMimeType,
       hasComprobantePago: hasComprobante,
       ocrStatus: hasComprobante ? 'PENDIENTE' : 'NO_ANALIZADO',
     };
 
+    if (mediaUrl) {
+      message.mediaUrl = mediaUrl;
+    }
+    if (mediaMimeType) {
+      message.mediaMimeType = mediaMimeType;
+    }
+
+    const cleanMessage = Object.fromEntries(
+      Object.entries(message).filter(([_, v]) => v !== undefined)
+    ) as WhatsAppMessage;
+
     try {
-      await setDoc(doc(db, MESSAGES_COLLECTION, msgId), message);
+      await setDoc(doc(db, MESSAGES_COLLECTION, msgId), cleanMessage);
       return { success: true, messageId: msgId };
     } catch {
       return { success: false, messageId: msgId };

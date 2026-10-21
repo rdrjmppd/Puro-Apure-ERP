@@ -277,6 +277,53 @@ async function saveMessageToFirestore(messageData: {
 }
 
 /**
+ * Resuelve un JID o LID de WhatsApp a número telefónico real E.164 consultando la tabla inversa de Baileys
+ */
+function resolveLidToPhoneNumber(
+  lineaId: string,
+  remoteJid: string,
+  participant?: string
+): { phone: string; isLid: boolean; lidRaw?: string } {
+  const isLid = remoteJid.includes('@lid') || (!!participant && participant.includes('@lid'));
+  const sessionDir = getSessionDir(lineaId);
+
+  // 1. Si no es LID, extraer dígitos directos del JID estándar @s.whatsapp.net
+  if (!isLid) {
+    const raw = remoteJid.split('@')[0].split(':')[0].replace(/[^\d]/g, '');
+    return { phone: raw ? `+${raw}` : '', isLid: false };
+  }
+
+  // 2. Si es LID, extraer el ID numérico
+  const targetJid = remoteJid.includes('@lid') ? remoteJid : (participant || '');
+  const lidClean = targetJid.replace('@lid', '').split(':')[0].replace(/[^\d]/g, '');
+
+  if (lidClean) {
+    // Buscar en archivo reverso de Baileys generado en sesión
+    const reverseFile = path.join(sessionDir, `lid-mapping-${lidClean}_reverse.json`);
+    if (fs.existsSync(reverseFile)) {
+      try {
+        const mapped = JSON.parse(fs.readFileSync(reverseFile, 'utf-8'));
+        const cleanMapped = String(mapped).replace(/[^\d]/g, '');
+        if (cleanMapped) {
+          return { phone: `+${cleanMapped}`, isLid: true, lidRaw: lidClean };
+        }
+      } catch {}
+    }
+  }
+
+  // 3. Si participant tiene formato estándar @s.whatsapp.net, usarlo
+  if (participant && participant.includes('@s.whatsapp.net')) {
+    const partDigits = participant.replace('@s.whatsapp.net', '').split(':')[0].replace(/[^\d]/g, '');
+    if (partDigits) {
+      return { phone: `+${partDigits}`, isLid: false, lidRaw: lidClean };
+    }
+  }
+
+  // 4. Si aún no hay mapeo inverso, retornar el LID limpio
+  return { phone: lidClean ? `+${lidClean}` : '', isLid: true, lidRaw: lidClean };
+}
+
+/**
  * Inicia o recupera el socket auténtico de Baileys para la línea especificada
  */
 export async function initializeBaileysSocket(lineaId: string): Promise<WASocket> {
@@ -480,13 +527,9 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
       const remoteJid = msg.key.remoteJid || '';
       const isFromMe = msg.key.fromMe || false;
 
-      // Normalización E.164: soporte JID estándar y LID
-      let phoneDigits = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '').replace(/[^\d]/g, '');
-      if (!phoneDigits && msg.key.participant) {
-        phoneDigits = msg.key.participant.replace('@s.whatsapp.net', '').replace('@lid', '').replace(/[^\d]/g, '');
-      }
-
-      const senderPhone = phoneDigits ? `+${phoneDigits}` : undefined;
+      // Normalización E.164 y resolución inversa de LIDs de WhatsApp
+      const resolved = resolveLidToPhoneNumber(lineaId, remoteJid, msg.key.participant);
+      const senderPhone = resolved.phone || undefined;
       const rawUser = sock.user?.id || '';
       const myPhoneDigits = rawUser.split(':')[0].split('@')[0].replace(/[^\d]/g, '');
       const myPhone = myPhoneDigits ? `+${myPhoneDigits}` : undefined;
@@ -651,7 +694,30 @@ export async function sendWhatsAppMessageHandler(
 
   try {
     const cleanDigits = toPhone.replace(/[^\d]/g, '');
-    const jid = `${cleanDigits}@s.whatsapp.net`;
+    const sessionDir = getSessionDir(lineaId);
+
+    // Detección de LID (identificador de 13+ dígitos sin prefijo nacional de Venezuela 58)
+    const isLid = cleanDigits.length > 13 && !cleanDigits.startsWith('58');
+    let jid = `${cleanDigits}@s.whatsapp.net`;
+
+    if (isLid) {
+      // Buscar si existe un mapeo inverso a número real para este LID
+      const reverseFile = path.join(sessionDir, `lid-mapping-${cleanDigits}_reverse.json`);
+      let mappedPhone = '';
+      if (fs.existsSync(reverseFile)) {
+        try {
+          const content = JSON.parse(fs.readFileSync(reverseFile, 'utf-8'));
+          mappedPhone = String(content).replace(/[^\d]/g, '');
+        } catch {}
+      }
+
+      if (mappedPhone) {
+        jid = `${mappedPhone}@s.whatsapp.net`;
+      } else {
+        // Enviar al identificador LID directamente
+        jid = `${cleanDigits}@lid`;
+      }
+    }
 
     let sentMsg;
     if (mediaDataUrl && mediaDataUrl.startsWith('data:image/')) {
@@ -674,7 +740,7 @@ export async function sendWhatsAppMessageHandler(
       id: messageId,
       lineaId,
       remitenteTelefono: myPhone,
-      destinatarioTelefono: `+${cleanDigits}`,
+      destinatarioTelefono: toPhone.startsWith('+') ? toPhone : `+${cleanDigits}`,
       direccion: 'SALIENTE',
       texto: text,
       timestamp: Date.now(),

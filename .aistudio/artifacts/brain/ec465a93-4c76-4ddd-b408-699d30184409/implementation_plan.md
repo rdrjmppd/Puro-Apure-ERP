@@ -1,84 +1,92 @@
-# Plan de Implementación: Resolución Definitiva de Desvinculación y Sincronización en Vivo de WhatsApp CRM
+# Informe de Auditoría y Plan de Remediación Técnica: WhatsApp CRM
 
-Diagnóstico y plan integral para corregir el cierre intempestivo de la ventana de desvinculación (< 2 segundos) y habilitar la sincronización bidireccional reactiva de mensajes entrantes en la ventana lateral del CRM, asegurando la visualización inmediata de clientes y prospectos.
+Auditoría forense de causas raíz y propuesta de solución técnica para la normalización de identificadores de cuenta (WhatsApp LIDs) y la resolución del fallo de escritura en Cloud Firestore al emitir mensajes salientes desde la plataforma.
 
 ---
 
-## 1. Diagnóstico Integral y Causas Raíces
+## 1. Resumen Ejecutivo del Diagnóstico
 
-### A. Causa Raíz del Cierre Prematuro del Modal de Desvinculación (< 2 segundos)
-En `src/components/crm/WhatsAppWebCloneView.tsx` (líneas 287-313):
-* El efecto de polling `fetchStatusAndQr` se activa automáticamente en cuanto `showQrModal` es verdadero.
-* Inmediatamente al montarse (y luego cada 3000 ms), invoca al endpoint `/api/whatsapp/status?lineaId=...`.
-* Dentro del bloque de éxito se encuentra la siguiente condición rígida:
+A partir del análisis de la captura de pantalla (`image_9b447a05.png`) y la inspección de la arquitectura de comunicación entre Baileys y Cloud Firestore, se determinó que la recepción de mensajes opera satisfactoriamente a nivel de transporte de red, pero presenta dos fallas de integración y serialización en capa de datos:
+
+1. **Distorsión de Identidad (LIDs expuestos como números telefónicos):** Los remitentes mostrados como `+25404815458478` y `+83983891230953` no son números internacionales de Kenia o destinos foráneos, sino identificadores internos **WhatsApp LID (Linked Identity ID)** generados por la arquitectura multi-dispositivo de WhatsApp para proteger la privacidad del usuario. Al recibir el mensaje, el sistema extrajo únicamente la cadena numérica del LID y le antepuso un signo `+`, visualizándolo como un número telefónico inválido.
+2. **Colapso al Enviar Mensajes (`setDoc() with undefined value`):** Al enviar texto simple como "hola", la función constructora del mensaje deja `mediaUrl` y `mediaMimeType` con valor `undefined`. El SDK cliente de Cloud Firestore rechaza de forma estricta cualquier campo con valor `undefined`, abortando la operación antes de alcanzar la red.
+
+---
+
+## 2. Aislamiento Detallado de Causas Raíz
+
+### Causa Raíz 1: Distorsión de Números Telefónicos por Identificadores LID
+* **Contexto de Baileys v6/v7:** En conexiones multi-dispositivo, WhatsApp no siempre transmite el número telefónico directo (`@s.whatsapp.net`), sino un identificador de dispositivo local (`@lid`), por ejemplo: `25404815458478@lid` o `83983891230953:1@lid`.
+* **Falla en `server/whatsappQrBridge.ts`:**
   ```typescript
-  if (res.estado === 'CONECTADO') {
-    setShowQrModal(false);
-  }
+  // Código actual que ocasiona el problema:
+  let phoneDigits = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '').replace(/[^\d]/g, '');
+  const senderPhone = phoneDigits ? `+${phoneDigits}` : undefined;
   ```
-* **Mecanismo del fallo:** Cuando la línea ya se encuentra emparejada (`CONECTADO`) y el operador hace clic para consultar el número o pulsar **"Desvincular"**, el endpoint responde casi de forma instantánea indicando `estado: 'CONECTADO'`. El hook asume erróneamente que se acaba de escanear un código QR con éxito y fuerza `setShowQrModal(false)`. Esto destruye la ventana modal en menos de 1 o 2 segundos, haciendo imposible pulsar el botón de desvinculación.
-* **Resolución técnica:** El auto-cierre debe condicionarse **únicamente** a transiciones vivas de escaneo (`ESPERANDO_QR` $\rightarrow$ `CONECTADO`). Si el modal fue abierto por el usuario cuando la línea ya estaba conectada, el modal debe permanecer abierto de manera persistente hasta que el usuario decida cerrarlo manualmente o ejecute la acción de desvincular.
+  Al remover `@lid` de `25404815458478@lid`, el código asume ciegamente que `25404815458478` son dígitos telefónicos y crea `+25404815458478`.
+* **Mecanismo de Resolución Omitido:** Baileys genera y almacena localmente en `.whatsapp_sessions/<lineaId>/` una serie de archivos de mapeo inverso (`lid-mapping-<lid>_reverse.json`) cuyo contenido es el número telefónico E.164 real del contacto (por ejemplo `"584245390630"`). Además, el mensaje entrante contiene el nombre público de perfil en `msg.pushName`. El servidor no estaba consultando este mapeo inverso antes de persistir el mensaje.
 
 ---
 
-### B. Causa Raíz de la Ausencia de Mensajes Entrantes en la Ventana Lateral
-En `src/components/crm/WhatsAppWebCloneView.tsx` y `src/services/whatsappCloneService.ts`:
-1. **Directorio Lateral Desconectado de los Mensajes Reales:**
-   * La lista de la ventana lateral (`contactList`) se genera exclusivamente iterando sobre el arreglo estático `entities` del ERP (`for (const ent of entities)`).
-   * **Mecanismo del fallo:** Si un cliente o prospecto escribe al número de WhatsApp vinculado, pero dicho número aún no ha sido dado de alta como cliente o proveedor en el ERP, el contacto es **completamente invisible** en la barra lateral.
-2. **Ausencia de Previsualización de Mensajes y Marcas de Tiempo en la Lista:**
-   * Los elementos de la barra lateral no se suscriben a la actividad de los mensajes; no muestran el extracto del último mensaje recibido ("Hola, transferí...", etc.), la hora ni el contador de mensajes.
-3. **Filtro de Historial en la Inicialización del Socket Baileys:**
-   * En `server/whatsappQrBridge.ts`, el socket de Baileys se inicializa con `syncFullHistory: false`, omitiendo conversaciones previas existentes en el dispositivo físico.
-4. **Resolución técnica:** 
-   * Implementar un observador en tiempo real de conversaciones para la línea activa en Firestore (`whatsapp_mensajes`).
-   * Unificar de forma reactiva las entidades del ERP con **todos los números entrantes/salientes** que interactúen con la línea.
-   * Mostrar el último mensaje y ordenar cronológicamente las conversaciones en la barra lateral según la actividad más reciente.
+### Causa Raíz 2: Error Fatal al Enviar Mensajes (`Unsupported field value: undefined in mediaUrl`)
+* **Falla en `src/services/whatsappCloneService.ts` (`sendWhatsAppMessage`):**
+  ```typescript
+  const message: WhatsAppMessage = {
+    id: msgId,
+    whatsappMessageId: msgId,
+    lineaId,
+    remitenteTelefono: remNorm,
+    destinatarioTelefono: destNorm,
+    direccion: 'SALIENTE',
+    texto,
+    timestamp: now,
+    estado: 'ENVIADO',
+    tipoMensaje,
+    mediaUrl, // <-- undefined cuando el mensaje es solo texto
+    mediaMimeType, // <-- undefined cuando el mensaje es solo texto
+    hasComprobantePago: false,
+    ocrStatus: 'NO_ANALIZADO',
+  };
+  await setDoc(docRef, message); // <-- EXCEPCIÓN FATAL DE FIRESTORE
+  ```
+* **Contrato de Firestore Web SDK:** A diferencia del entorno Node.js Admin SDK (donde se puede activar `ignoreUndefinedProperties`), el SDK web cliente de Firestore prohíbe explícitamente valores `undefined` en documentos. Al detectar `mediaUrl: undefined`, Firestore bloquea la promesa y lanza:
+  `Function setDoc() called with invalid data. Unsupported field value: undefined (found in field mediaUrl in document whatsapp_mensajes/WAM-...)`.
 
 ---
 
-## 2. Decisiones de Arquitectura Acordadas con el Usuario
-* **Directorio Unificado:** Mostrar en la ventana lateral tanto las entidades existentes del ERP como **todos los clientes que escriban**, permitiendo atender prospectos nuevos de inmediato.
-* **Alcance de Sincronización:** Habilitar sincronización de historial reciente al vincular y persistencia en tiempo real de mensajes entrantes y salientes.
+## 3. Decisiones de Arquitectura Acordadas
+
+1. **Resolución de Identidad:** Mapeo automático de identificadores LID hacia su número telefónico E.164 real utilizando la base de datos de mapeo de Baileys, complementado con el nombre de perfil público (`pushName`) como titular principal en la interfaz.
+2. **Sanitización de Datos:** Limpieza defensiva en el cliente previa a la llamada de `setDoc()`, eliminando cualquier propiedad con valor `undefined` mediante un serializador estricto sin pérdida de metadatos.
 
 ---
 
-## 3. Plan de Trabajo Detallado
+## 4. Plan de Remediación Propuesto (Sin Ejecución de Código)
 
-### Fase 1: Blindaje del Modal de Estado y Desvinculación (`WhatsAppWebCloneView.tsx`)
-* En `WhatsAppWebCloneView.tsx`:
-  * Almacenar mediante una referencia (`wasWaitingQrOnOpenRef`) si el modal se abrió en modo emparejamiento (`ESPERANDO_QR` / `DESCONECTADO`).
-  * Modificar `fetchStatusAndQr` para que `setShowQrModal(false)` se dispare **únicamente** si `wasWaitingQrOnOpenRef.current === true` y el nuevo estado recibido es `CONECTADO`.
-  * Si el usuario abrió el modal estando ya conectado (para ver el estado o desvincular), garantizar que la ventana se mantenga abierta permanentemente.
-  * Añadir confirmación visual durante el proceso de desvinculación (`isDisconnecting`) con resguardo ante clics repetidos.
+### Fase 1: Motor de Resolución Inversa LID $\rightarrow$ E.164 (`server/whatsappQrBridge.ts`)
+* Implementar la función auxiliar `resolveLidToPhoneNumber(lineaId: string, remoteJid: string): string`:
+  1. Si el JID termina en `@s.whatsapp.net`, extraer directamente los dígitos del teléfono.
+  2. Si el JID termina en `@lid`, consultar la caché en memoria y el archivo `lid-mapping-<lid>_reverse.json` dentro del directorio de la sesión para obtener el número telefónico real.
+  3. Si no existe mapeo previo (contacto nuevo), registrar el JID limpio pero priorizar el `pushName` (nombre público de WhatsApp) como nombre principal del remitente.
+* Almacenar en el documento de Firestore tanto el número resuelto como el `pushName` y el `remoteJid` original para trazabilidad completa.
 
-### Fase 2: Motor Reactivo de Conversaciones para la Barra Lateral (`whatsappCloneService.ts` & `WhatsAppWebCloneView.tsx`)
-* **Servicio `whatsappCloneService.ts`:**
-  * Crear método `subscribeLineRecentConversations(lineaId, callback)` que escuche la colección `whatsapp_mensajes` para la línea activa y extraiga un mapa resumido por teléfono:
-    ```typescript
-    interface ConversationSummary {
-      telefonoE164: string;
-      ultimoMensajeTexto: string;
-      ultimoMensajeTimestamp: number;
-      ultimoMensajeDireccion: 'ENTRANTE' | 'SALIENTE';
-      hasComprobantePago: boolean;
-      unreadCount: number;
-    }
-    ```
-* **Componente `WhatsAppWebCloneView.tsx`:**
-  * Enriquecer `contactList`:
-    1. Mapear las entidades del ERP vinculando su saldo pendiente y estado crediticio.
-    2. Incorporar cualquier número telefónico que registre mensajes en Firestore y que no esté aún en `entities`, asignándole el rol `PROSPECTO_WHATSAPP`.
-    3. Asociar a cada tarjeta su último mensaje, fecha/hora formateada y etiqueta visual si contiene comprobante de pago.
-    4. Ordenar la lista lateral en orden descendente por `ultimoMensajeTimestamp`.
+### Fase 2: Sanitización DevSecOps en el Cliente (`src/services/whatsappCloneService.ts`)
+* Implementar la función de utilidad `sanitizeFirestorePayload<T>(data: T): Record<string, any>` que filtre y elimine recursivamente todas las propiedades con valor `undefined`:
+  ```typescript
+  const cleanMessage = Object.fromEntries(
+    Object.entries(message).filter(([_, value]) => value !== undefined)
+  );
+  await setDoc(docRef, cleanMessage);
+  ```
+* Garantizar que los campos opcionales como `mediaUrl` y `mediaMimeType` solo se adjunten al documento cuando realmente existan datos binarios o URLs válidas.
 
-### Fase 3: Optimización del Socket Baileys en Backend (`server/whatsappQrBridge.ts`)
-* Configurar la pasarela Baileys para procesar eventos de sincronización de chats y mensajes al completar la vinculación.
-* Asegurar que cada mensaje recibido (`messages.upsert`) normalice el teléfono a formato E.164 y guarde de inmediato en `whatsapp_mensajes` con atributos completos: `remitenteTelefono`, `destinatarioTelefono`, `texto`, `mediaUrl`, `timestamp`, `direccion`.
-* Si un mensaje entrante contiene una imagen, registrarlo simultáneamente en `pagos_reportados_ocr` para el flujo de pre-conciliación financiera sin alterar el libro mayor.
+### Fase 3: Enriquecimiento de la Interfaz Lateral (`WhatsAppWebCloneView.tsx`)
+* Ajustar la tarjeta del contacto en la barra lateral para que:
+  * Si el contacto tiene un `pushName` o nombre registrado en el ERP, lo muestre como título destacado.
+  * Debajo del nombre se muestre el número telefónico real (ej. `+58 424 5390630`) en tipografía monoespaciada legible, en lugar del código LID interno.
+  * La caja de error inferior se limpie automáticamente al reintentar el envío.
 
-### Fase 4: Certificación y Pruebas
-* **Prueba de Desvinculación:** Abrir el modal de una línea ya conectada y verificar que permanece abierto sin cerrarse. Ejecutar la desvinculación y comprobar el cambio de estado a `DESCONECTADO`.
-* **Prueba de Mensajes Entrantes:** Enviar un mensaje de prueba al número conectado y verificar que aparezca instantáneamente en la barra lateral con su texto y marca de tiempo.
-* **Prueba de Reanudación de Sesión:** Reiniciar el servidor de desarrollo y verificar que la sesión se restaure con credenciales cifradas sin requerir re-escaneo de QR.
-* **Compilación y Linters:** Ejecutar `npm run lint` y `npm run build` para validar ausencia de errores de tipos o advertencias de React.
+### Fase 4: Protocolo de Verificación y Auditoría
+1. **Prueba de Envío de Texto:** Enviar un mensaje de prueba ("hola") desde la plataforma y confirmar que se entregue a la pasarela Baileys sin arrojar la excepción de `setDoc()`.
+2. **Prueba de Recepción con LID:** Enviar un mensaje desde un teléfono vinculado y comprobar que en la ventana lateral aparezca el nombre del contacto y su número telefónico real sin distorsión.
+3. **Pruebas Automatizadas:** Ejecutar `npm run lint` y la suite de pruebas unitarias para certificar la estabilidad de la aplicación.
