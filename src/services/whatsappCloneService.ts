@@ -30,6 +30,12 @@ const LINES_COLLECTION = 'whatsapp_lineas';
 const MESSAGES_COLLECTION = 'whatsapp_mensajes';
 const TEMPLATES_COLLECTION = 'whatsapp_plantillas';
 
+export const DEFAULT_LINE_NAMES: Record<string, string> = {
+  linea_cobranzas: 'Línea de Crédito y Cobranzas',
+  linea_ventas: 'Línea de Ventas y Despacho',
+  linea_brm: 'Línea de Proveedores y BRM',
+};
+
 /**
  * Normaliza cualquier número telefónico al estándar internacional E.164 (+58...)
  * Soporta números venezolanos móviles (0412, 0414, 0424, 0416, 0426) o internacionales.
@@ -151,15 +157,21 @@ export class WhatsAppCloneService {
       // Saneamiento DevSecOps: Si algún doc en Firestore tiene números ficticios heredados, sanearlos
       const lines = snap.docs.map((d) => {
         const data = d.data() as WhatsAppLine;
+        const nombre =
+          data.nombre || DEFAULT_LINE_NAMES[data.id || d.id] || `Línea ${data.id || d.id}`;
         if (data.numeroTelefono && data.numeroTelefono.includes('58414000000')) {
           return {
             ...data,
+            nombre,
             numeroTelefono: '',
             estado: (data.estado === 'CONECTADO' ? 'DESCONECTADO' : data.estado) as WhatsAppLine['estado'],
             isOnline: false,
           };
         }
-        return data;
+        return {
+          ...data,
+          nombre,
+        };
       });
       return lines;
     } catch {
@@ -177,15 +189,21 @@ export class WhatsAppCloneService {
       (snapshot) => {
         const lines = snapshot.docs.map((d) => {
           const data = d.data() as WhatsAppLine;
+          const nombre =
+            data.nombre || DEFAULT_LINE_NAMES[data.id || d.id] || `Línea ${data.id || d.id}`;
           if (data.numeroTelefono && data.numeroTelefono.includes('58414000000')) {
             return {
               ...data,
+              nombre,
               numeroTelefono: '',
               estado: (data.estado === 'CONECTADO' ? 'DESCONECTADO' : data.estado) as WhatsAppLine['estado'],
               isOnline: false,
             };
           }
-          return data;
+          return {
+            ...data,
+            nombre,
+          };
         });
         callback(lines);
       },
@@ -196,7 +214,7 @@ export class WhatsAppCloneService {
   }
 
   /**
-   * Actualiza el estado de una línea
+   * Actualiza el estado de una línea de forma resiliente con merge
    */
   static async updateLineStatus(
     lineaId: string,
@@ -205,12 +223,19 @@ export class WhatsAppCloneService {
   ): Promise<boolean> {
     try {
       const ref = doc(db, LINES_COLLECTION, lineaId);
-      await updateDoc(ref, {
-        estado,
-        qrCodeDataUri: qrDataUri || null,
-        lastActivityTimestamp: Date.now(),
-        isOnline: estado === 'CONECTADO',
-      });
+      const nombreFallback = DEFAULT_LINE_NAMES[lineaId] || `Línea ${lineaId}`;
+      await setDoc(
+        ref,
+        {
+          id: lineaId,
+          nombre: nombreFallback,
+          estado,
+          qrCodeDataUri: qrDataUri || null,
+          lastActivityTimestamp: Date.now(),
+          isOnline: estado === 'CONECTADO',
+        },
+        { merge: true }
+      );
       return true;
     } catch (err) {
       console.error('[WhatsAppCloneService] Error actualizando estado de línea:', err);

@@ -195,6 +195,12 @@ async function logWhatsAppAudit(entry: {
   }
 }
 
+const DEFAULT_BRIDGE_LINE_NAMES: Record<string, string> = {
+  linea_cobranzas: 'Línea de Crédito y Cobranzas',
+  linea_ventas: 'Línea de Ventas y Despacho',
+  linea_brm: 'Línea de Proveedores y BRM',
+};
+
 /**
  * Sincroniza el estado de la línea con Firestore para que el frontend lo lea en tiempo real
  */
@@ -203,6 +209,7 @@ async function syncLineToFirestore(lineaId: string, status: Record<string, any>)
     const docRef = adminDb.collection('whatsapp_lineas').doc(lineaId);
     await docRef.set(
       {
+        nombre: DEFAULT_BRIDGE_LINE_NAMES[lineaId] || `Línea ${lineaId}`,
         ...status,
         lastActivityTimestamp: Date.now(),
       },

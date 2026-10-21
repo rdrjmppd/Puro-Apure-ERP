@@ -411,7 +411,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                     l.estado === 'CONECTADO' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
                   }`}
                 />
-                <span>{l.nombre.replace('Línea de ', '')}</span>
+                <span>{(l.nombre || l.id || 'Línea').replace('Línea de ', '')}</span>
               </button>
             ))}
           </div>
