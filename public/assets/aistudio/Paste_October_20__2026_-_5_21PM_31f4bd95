@@ -1,0 +1,2572 @@
+Analyzed BandejaPreConciliacionOCR.tsx:L1-400
+Analyzed BandejaPreConciliacionOCR.tsx:L401-476
+Analyzed LectorComprobanteOCRModal.tsx:L1-400
+Analyzed LectorComprobanteOCRModal.tsx:L401-769
+Analyzed WhatsAppWebCloneView.tsx:L1-400
+Analyzed WhatsAppWebCloneView.tsx:L401-800
+Analyzed WhatsAppWebCloneView.tsx:L801-950
+Analyzed ReconciliationTab.tsx:L1-330
+
+Aquí tienes el bloque completo y listo para copiar y pegar en **Google AI Studio** correspondiente a la **Iteración 2 (Componentes UI de Finanzas y CRM: Bandeja de Pre-Conciliación, Lector Modal Split-View, Clon de WhatsApp Web y Pestaña de Conciliación)**.
+
+Copia todo el contenido dentro del recuadro a continuación y pégalo en Google AI Studio:
+
+***
+
+```markdown
+# ORDEN DETERMINISTA DE IMPLEMENTACIÓN — ITERACIÓN 2 DE 3
+Actúa como Ingeniero Frontend Especialista en Puro Apure ERP. Escribe íntegramente (sin resumir, sin omitir líneas y sin alterar la lógica) los siguientes 4 componentes visuales en sus rutas exactas:
+
+---
+
+### ARCHIVO 1 DE 4: `src/components/finanzas/BandejaPreConciliacionOCR.tsx`
+```tsx
+/**
+ * Componente: Bandeja de Pre-Conciliación de Comprobantes OCR & Auditoría Forense
+ * Puro Apure ERP - Módulo de Finanzas & Conciliación
+ * 
+ * Regla de Oro: Separación estricta entre reporte de pago y conciliación contable.
+ * Ningún comprobante altera el libro mayor hasta ser auditado y aprobado atómicamente.
+ */
+
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  ShieldCheck,
+  ShieldAlert,
+  AlertTriangle,
+  Receipt,
+  Search,
+  Filter,
+  Sparkles,
+  ExternalLink,
+  CheckCircle2,
+  Clock,
+  ArrowUpRight,
+  Eye,
+  Calendar,
+  Building,
+  User,
+  DollarSign,
+  RefreshCw,
+  Plus,
+} from 'lucide-react';
+import {
+  PagoReportadoOCR,
+  VeredictoVeracidad,
+  TipoComprobanteOCR,
+} from '../../types/ocrForensic';
+import { DualEntity } from '../../types/finance';
+import { OcrForensicService } from '../../services/ocrForensicService';
+
+interface BandejaPreConciliacionOCRProps {
+  onSelectRecord: (record: PagoReportadoOCR) => void;
+  onOpenNewOCRModal: () => void;
+  entities: DualEntity[];
+  bcvRate: number;
+}
+
+type FiltroBandeja =
+  | 'TODOS'
+  | 'PENDIENTES'
+  | 'ALTA_CONFIANZA'
+  | 'SOSPECHOSOS'
+  | 'ALERTA_FRAUDE'
+  | 'CONCILIADOS';
+
+export const BandejaPreConciliacionOCR: React.FC<BandejaPreConciliacionOCRProps> = ({
+  onSelectRecord,
+  onOpenNewOCRModal,
+  entities,
+  bcvRate,
+}) => {
+  const [payments, setPayments] = useState<PagoReportadoOCR[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [filtro, setFiltro] = useState<FiltroBandeja>('PENDIENTES');
+  const [busqueda, setBusqueda] = useState<string>('');
+
+  // Suscripción reactiva en tiempo real a la colección 'pagos_reportados_ocr'
+  useEffect(() => {
+    setIsLoading(true);
+    const unsub = OcrForensicService.subscribePendingReportedPayments((recs) => {
+      setPayments(recs);
+      setIsLoading(false);
+    });
+    return () => unsub();
+  }, []);
+
+  // Filtrado reactivo en memoria
+  const filteredPayments = useMemo(() => {
+    return payments.filter((p) => {
+      // 1. Filtro por categoría / estado
+      if (filtro === 'PENDIENTES' && p.estadoConciliacion !== 'pendiente_revision') {
+        return false;
+      }
+      if (filtro === 'CONCILIADOS' && p.estadoConciliacion !== 'aprobado_conciliado') {
+        return false;
+      }
+      if (filtro === 'ALTA_CONFIANZA' && p.dictamenVeracidad?.veredicto !== 'AUTENTICO_ALTA_CONFIANZA') {
+        return false;
+      }
+      if (filtro === 'SOSPECHOSOS' && p.dictamenVeracidad?.veredicto !== 'SOSPECHOSO_REVISION_HUMANA') {
+        return false;
+      }
+      if (filtro === 'ALERTA_FRAUDE' && p.dictamenVeracidad?.veredicto !== 'ALERTA_FRAUDE_EDICION_O_IA') {
+        return false;
+      }
+
+      // 2. Filtro por texto de búsqueda
+      if (busqueda.trim()) {
+        const query = busqueda.toLowerCase().trim();
+        const ref = (p.numeroReferencia || '').toLowerCase();
+        const refNorm = (p.referenciaNormalizada || '').toLowerCase();
+        const banco = (p.bancoEmisor || '').toLowerCase();
+        const cliente = (p.clienteNombreSugerido || '').toLowerCase();
+        const rif = (p.rifCedula || '').toLowerCase();
+        const emisor = (p.telefonoNombreEmisor || '').toLowerCase();
+
+        return (
+          ref.includes(query) ||
+          refNorm.includes(query) ||
+          banco.includes(query) ||
+          cliente.includes(query) ||
+          rif.includes(query) ||
+          emisor.includes(query)
+        );
+      }
+
+      return true;
+    });
+  }, [payments, filtro, busqueda]);
+
+  // Contadores y métricas KPI
+  const stats = useMemo(() => {
+    const pendientes = payments.filter((p) => p.estadoConciliacion === 'pendiente_revision');
+    const totalUSD = pendientes.reduce((acc, p) => acc + (p.montoEquivalenteUSD || 0), 0);
+    const autenticos = payments.filter((p) => p.dictamenVeracidad?.veredicto === 'AUTENTICO_ALTA_CONFIANZA');
+    const sospechosos = payments.filter((p) => p.dictamenVeracidad?.veredicto === 'SOSPECHOSO_REVISION_HUMANA');
+    const fraudes = payments.filter((p) => p.dictamenVeracidad?.veredicto === 'ALERTA_FRAUDE_EDICION_O_IA');
+
+    return {
+      pendientesCount: pendientes.length,
+      pendientesUSD: totalUSD,
+      autenticosCount: autenticos.length,
+      sospechososCount: sospechosos.length,
+      fraudesCount: fraudes.length,
+    };
+  }, [payments]);
+
+  // Helper para renderizar insignia de veracidad
+  const renderVeracityBadge = (veredicto?: VeredictoVeracidad, score?: number) => {
+    const finalScore = score !== undefined ? score : 0;
+    if (veredicto === 'AUTENTICO_ALTA_CONFIANZA') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-700/80 shadow-xs">
+          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span>Auténtico ({finalScore} pts)</span>
+        </span>
+      );
+    }
+    if (veredicto === 'SOSPECHOSO_REVISION_HUMANA') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-950/80 text-amber-300 border border-amber-700/80 shadow-xs">
+          <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          <span>Sospechoso ({finalScore} pts)</span>
+        </span>
+      );
+    }
+    if (veredicto === 'ALERTA_FRAUDE_EDICION_O_IA') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-950/90 text-rose-300 border border-rose-700 shadow-xs animate-pulse">
+          <ShieldAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+          <span>Alerta Fraude ({finalScore} pts)</span>
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium bg-slate-800 text-slate-400 border border-slate-700">
+        <Clock className="w-3.5 h-3.5" />
+        <span>Sin Analizar</span>
+      </span>
+    );
+  };
+
+  return (
+    <div className="space-y-4 animate-fadeIn">
+      {/* Cabecera y Botón de Acción Principal */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 bg-slate-900 border border-slate-800 rounded-3xl shadow-lg">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-xl bg-purple-500/10 border border-purple-500/30 flex items-center justify-center text-purple-400">
+              <Receipt className="w-4 h-4" />
+            </div>
+            <h3 className="text-sm font-bold text-white tracking-tight flex items-center gap-2">
+              <span>Bandeja de Pre-Conciliación Forense OCR</span>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-purple-950 text-purple-300 border border-purple-800">
+                Auditoría Anti-Fraude
+              </span>
+            </h3>
+          </div>
+          <p className="text-xs text-slate-400">
+            Evidencias de pago recibidas por WhatsApp o captura directa. Los pagos permanecen aislados hasta su cruce y conciliación formal.
+          </p>
+        </div>
+
+        <button
+          onClick={onOpenNewOCRModal}
+          className="min-h-[44px] px-4 py-2.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-semibold transition flex items-center gap-2 shadow-lg shadow-purple-950/40 cursor-pointer w-full sm:w-auto justify-center"
+        >
+          <Sparkles className="w-4 h-4" />
+          <span>+ Cargar Comprobante (OCR / Ctrl+V)</span>
+        </button>
+      </div>
+
+      {/* Tarjetas KPI de la Bandeja */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="p-4 bg-slate-900/90 border border-slate-800 rounded-2xl">
+          <div className="text-[11px] text-slate-400 font-semibold uppercase tracking-wider flex items-center justify-between">
+            <span>Pendientes por Conciliar</span>
+            <Clock className="w-3.5 h-3.5 text-amber-400" />
+          </div>
+          <div className="text-xl font-bold font-mono text-amber-300 mt-1">
+            {stats.pendientesCount} <span className="text-xs text-slate-400 font-sans font-normal">comprobantes</span>
+          </div>
+          <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+            ${stats.pendientesUSD.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+          </div>
+        </div>
+
+        <div className="p-4 bg-slate-900/90 border border-slate-800 rounded-2xl">
+          <div className="text-[11px] text-slate-400 font-semibold uppercase tracking-wider flex items-center justify-between">
+            <span>Auténticos (Alta Confianza)</span>
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+          </div>
+          <div className="text-xl font-bold font-mono text-emerald-400 mt-1">
+            {stats.autenticosCount}
+          </div>
+          <div className="text-[11px] text-emerald-500/80 font-sans mt-0.5">
+            Score verificado &ge; 80 pts
+          </div>
+        </div>
+
+        <div className="p-4 bg-slate-900/90 border border-slate-800 rounded-2xl">
+          <div className="text-[11px] text-slate-400 font-semibold uppercase tracking-wider flex items-center justify-between">
+            <span>Revisión Humana</span>
+            <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+          </div>
+          <div className="text-xl font-bold font-mono text-amber-400 mt-1">
+            {stats.sospechososCount}
+          </div>
+          <div className="text-[11px] text-amber-500/80 font-sans mt-0.5">
+            Discrepancia leve o tipográfica
+          </div>
+        </div>
+
+        <div className="p-4 bg-slate-900/90 border border-rose-900/40 rounded-2xl">
+          <div className="text-[11px] text-rose-300 font-semibold uppercase tracking-wider flex items-center justify-between">
+            <span>Alertas de Fraude / IA</span>
+            <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
+          </div>
+          <div className="text-xl font-bold font-mono text-rose-400 mt-1">
+            {stats.fraudesCount}
+          </div>
+          <div className="text-[11px] text-rose-400/80 font-sans mt-0.5">
+            Hash duplicado o edición detectada
+          </div>
+        </div>
+      </div>
+
+      {/* Barra de Filtros y Búsqueda */}
+      <div className="p-3 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+        {/* Pestañas de Filtro */}
+        <div className="flex flex-wrap items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+          {(
+            [
+              { key: 'PENDIENTES', label: 'Pendientes' },
+              { key: 'ALTA_CONFIANZA', label: 'Auténticos' },
+              { key: 'SOSPECHOSOS', label: 'Sospechosos' },
+              { key: 'ALERTA_FRAUDE', label: 'Fraude / IA' },
+              { key: 'CONCILIADOS', label: 'Conciliados' },
+              { key: 'TODOS', label: 'Todos' },
+            ] as const
+          ).map((item) => (
+            <button
+              key={item.key}
+              onClick={() => setFiltro(item.key)}
+              className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                filtro === item.key
+                  ? 'bg-purple-600 text-white shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Buscador */}
+        <div className="relative flex-1 max-w-md">
+          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+          <input
+            type="text"
+            value={busqueda}
+            onChange={(e) => setBusqueda(e.target.value)}
+            placeholder="Buscar por referencia, banco, cliente, RIF o teléfono..."
+            className="w-full min-h-[40px] pl-9 pr-3 py-1.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-hidden focus:border-purple-500 transition font-sans"
+          />
+          {busqueda && (
+            <button
+              onClick={() => setBusqueda('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 text-xs"
+            >
+              Limpiar
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Tabla / Lista de Comprobantes */}
+      <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-xl">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs text-slate-300">
+            <thead className="bg-slate-950/90 uppercase tracking-wider text-[11px] text-slate-400 border-b border-slate-800">
+              <tr>
+                <th className="py-3.5 px-4 font-semibold">Captura</th>
+                <th className="py-3.5 px-4 font-semibold">Fecha &amp; Tipo</th>
+                <th className="py-3.5 px-4 font-semibold">Remitente / Cliente Sugerido</th>
+                <th className="py-3.5 px-4 font-semibold">Banco &amp; Referencia</th>
+                <th className="py-3.5 px-4 font-semibold text-right">Monto Original</th>
+                <th className="py-3.5 px-4 font-semibold text-right">Equivalente USD</th>
+                <th className="py-3.5 px-4 font-semibold text-center">Veracidad (4 Candados)</th>
+                <th className="py-3.5 px-4 font-semibold text-center">Estado</th>
+                <th className="py-3.5 px-4 font-semibold text-right">Acción</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/60 font-sans">
+              {isLoading ? (
+                <tr>
+                  <td colSpan={9} className="py-12 text-center text-slate-400 font-sans">
+                    <div className="flex items-center justify-center gap-2">
+                      <RefreshCw className="w-4 h-4 animate-spin text-purple-400" />
+                      <span>Cargando comprobantes de pre-conciliación...</span>
+                    </div>
+                  </td>
+                </tr>
+              ) : filteredPayments.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="py-12 text-center text-slate-500 italic">
+                    <div className="max-w-md mx-auto space-y-2">
+                      <div className="w-10 h-10 rounded-2xl bg-slate-800/60 text-slate-400 flex items-center justify-center mx-auto">
+                        <Receipt className="w-5 h-5" />
+                      </div>
+                      <div className="font-semibold text-slate-300 text-xs">
+                        No hay comprobantes para este criterio de búsqueda o filtro.
+                      </div>
+                      <p className="text-[11px] text-slate-500 font-normal">
+                        Las evidencias de pago recibidas en el chat de WhatsApp o cargadas manualmente aparecerán aquí para su análisis forense antes de afectar el libro mayor.
+                      </p>
+                      <button
+                        onClick={onOpenNewOCRModal}
+                        className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-600/30 hover:bg-purple-600/50 text-purple-300 text-xs font-medium border border-purple-500/40 transition cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Analizar un Comprobante Ahora</span>
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ) : (
+                filteredPayments.map((p) => {
+                  const isConciliado = p.estadoConciliacion === 'aprobado_conciliado';
+                  return (
+                    <tr
+                      key={p.id}
+                      className="hover:bg-slate-800/40 transition group cursor-pointer"
+                      onClick={() => onSelectRecord(p)}
+                    >
+                      {/* Miniatura */}
+                      <td className="py-3 px-4">
+                        <div className="w-12 h-12 rounded-xl bg-slate-950 border border-slate-800 overflow-hidden relative shrink-0 flex items-center justify-center">
+                          {p.comprobanteOriginalUrl ? (
+                            <img
+                              src={p.comprobanteOriginalUrl}
+                              alt="Comprobante"
+                              className="w-full h-full object-cover group-hover:scale-110 transition duration-200"
+                            />
+                          ) : (
+                            <Receipt className="w-5 h-5 text-slate-600" />
+                          )}
+                          <div className="absolute inset-0 bg-slate-950/40 opacity-0 group-hover:opacity-100 transition flex items-center justify-center text-white">
+                            <Eye className="w-3.5 h-3.5" />
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* Fecha & Tipo */}
+                      <td className="py-3 px-4">
+                        <div className="font-mono text-white text-xs">{p.fechaComprobante || 'N/A'}</div>
+                        <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700 mt-0.5">
+                          {p.tipoComprobante}
+                        </span>
+                      </td>
+
+                      {/* Remitente / Cliente Sugerido */}
+                      <td className="py-3 px-4">
+                        <div className="font-semibold text-white">
+                          {p.clienteNombreSugerido || p.telefonoNombreEmisor || 'Remitente no asignado'}
+                        </div>
+                        <div className="text-[11px] text-slate-400 font-mono flex items-center gap-1.5">
+                          {p.rifCedula && <span>RIF: {p.rifCedula}</span>}
+                          {p.whatsappMessageIdOrigen && (
+                            <span className="text-[10px] text-emerald-400 bg-emerald-950/60 px-1 rounded">
+                              WhatsApp
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      {/* Banco & Referencia */}
+                      <td className="py-3 px-4 font-mono">
+                        <div className="text-white font-bold">{p.referenciaNormalizada || p.numeroReferencia || 'S/R'}</div>
+                        <div className="text-[11px] text-slate-400 font-sans">{p.bancoEmisor || 'Banco no especificado'}</div>
+                      </td>
+
+                      {/* Monto Original */}
+                      <td className="py-3 px-4 text-right font-mono font-bold text-slate-200">
+                        {p.monedaOriginal === 'USD' ? '$' : 'Bs. '}
+                        {p.montoOriginal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+
+                      {/* Equivalente USD */}
+                      <td className="py-3 px-4 text-right font-mono font-bold text-emerald-400">
+                        ${p.montoEquivalenteUSD.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        <div className="text-[10px] text-slate-500 font-sans font-normal">
+                          Tasa: Bs. {p.tasaBcvSnapshot.toFixed(2)}
+                        </div>
+                      </td>
+
+                      {/* Semáforo de Veracidad */}
+                      <td className="py-3 px-4 text-center">
+                        {renderVeracityBadge(p.dictamenVeracidad?.veredicto, p.dictamenVeracidad?.score)}
+                      </td>
+
+                      {/* Estado */}
+                      <td className="py-3 px-4 text-center">
+                        <span
+                          className={`px-2.5 py-1 rounded-full text-[10px] font-bold inline-flex items-center gap-1 ${
+                            isConciliado
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-700'
+                              : 'bg-amber-950 text-amber-300 border border-amber-700'
+                          }`}
+                        >
+                          {isConciliado ? (
+                            <>
+                              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                              <span>Conciliado</span>
+                            </>
+                          ) : (
+                            <>
+                              <Clock className="w-3 h-3 text-amber-400" />
+                              <span>Pendiente</span>
+                            </>
+                          )}
+                        </span>
+                      </td>
+
+                      {/* Acción */}
+                      <td className="py-3 px-4 text-right" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={() => onSelectRecord(p)}
+                          className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 ml-auto ${
+                            isConciliado
+                              ? 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                              : 'bg-purple-600 hover:bg-purple-500 text-white shadow-md shadow-purple-950/40'
+                          }`}
+                        >
+                          <span>{isConciliado ? 'Ver Registro' : 'Revisar y Conciliar'}</span>
+                          <ArrowUpRight className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+### ARCHIVO 2 DE 4: `src/components/finanzas/LectorComprobanteOCRModal.tsx`
+```tsx
+/**
+ * Componente: Lector OCR Multimodal y Modal de Pre-Conciliación Forense Anti-IA / Anti-Fraude
+ * Puro Apure ERP - Módulo de Finanzas & Conciliación
+ * Captura por Archivo, Cámara o Ctrl+V • Disparo 100% Manual • Cuatro Candados de Veracidad
+ */
+
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  FileText,
+  Sparkles,
+  Upload,
+  Camera,
+  ClipboardPaste,
+  ShieldCheck,
+  AlertTriangle,
+  ShieldAlert,
+  CheckCircle2,
+  X,
+  RefreshCw,
+  Maximize2,
+  DollarSign,
+  Receipt,
+  User,
+  Calendar,
+  Building,
+  Info,
+  Lock,
+} from 'lucide-react';
+import {
+  PagoReportadoOCR,
+  DictamenVeracidadOCR,
+  VeredictoVeracidad,
+} from '../../types/ocrForensic';
+import { DualEntity, BillingInvoice } from '../../types/finance';
+import { OcrForensicService } from '../../services/ocrForensicService';
+import { centsRound } from '../../services/financialAnalyticsService';
+import { useAuth } from '../../context/AuthContext';
+
+interface LectorComprobanteOCRModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  initialImageDataUrl?: string | null;
+  initialRecord?: PagoReportadoOCR | null;
+  initialClientPhone?: string;
+  entities: DualEntity[];
+  invoices: BillingInvoice[];
+  bcvRate: number;
+  onPaymentReconciled?: (paymentRecordId: string) => void;
+}
+
+export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps> = ({
+  isOpen,
+  onClose,
+  initialImageDataUrl,
+  initialRecord,
+  initialClientPhone,
+  entities,
+  invoices,
+  bcvRate,
+  onPaymentReconciled,
+}) => {
+  const { userProfile, role, isAdmin, isSuperAdmin } = useAuth();
+
+  // 1. Imagen y Captura
+  const [imageDataUrl, setImageDataUrl] = useState<string | null>(initialImageDataUrl || null);
+  const [imageMimeType, setImageMimeType] = useState<string>('image/jpeg');
+  const [isZoomed, setIsZoomed] = useState<boolean>(false);
+
+  // 2. Estado de Análisis Forense OCR
+  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
+  const [analyzedRecord, setAnalyzedRecord] = useState<PagoReportadoOCR | null>(null);
+  const [existingRecords, setExistingRecords] = useState<PagoReportadoOCR[]>([]);
+
+  // 3. Formulario de Pre-Conciliación
+  const [selectedEntityId, setSelectedEntityId] = useState<string>('');
+  const [selectedInvoiceId, setSelectedInvoiceId] = useState<string>('');
+  const [tipoComprobante, setTipoComprobante] = useState<string>('PAGO_MOVIL');
+  const [bancoEmisor, setBancoEmisor] = useState<string>('');
+  const [bancoReceptor, setBancoReceptor] = useState<string>('');
+  const [numeroReferencia, setNumeroReferencia] = useState<string>('');
+  const [fechaComprobante, setFechaComprobante] = useState<string>('');
+  const [monedaOriginal, setMonedaOriginal] = useState<'VES' | 'USD'>('VES');
+  const [montoOriginal, setMontoOriginal] = useState<number>(0);
+  const [tasaBcvSnapshot, setTasaBcvSnapshot] = useState<number>(bcvRate || 1);
+  const [notasRevision, setNotasRevision] = useState<string>('');
+  const [justificacionSuperAdmin, setJustificacionSuperAdmin] = useState<string>('');
+
+  // 4. Feedback
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  // Cargar registros existentes para validación de Candado 1 (Anti-Reciclaje)
+  useEffect(() => {
+    if (!isOpen) return;
+    const unsub = OcrForensicService.subscribePendingReportedPayments((recs) => {
+      setExistingRecords(recs);
+    });
+    return () => unsub();
+  }, [isOpen]);
+
+  // Actualizar imagen inicial si se recibe por props
+  useEffect(() => {
+    if (initialImageDataUrl) {
+      setImageDataUrl(initialImageDataUrl);
+      setAnalyzedRecord(null);
+    }
+  }, [initialImageDataUrl]);
+
+  // Si se recibe un comprobante existente o pre-analizado desde la bandeja
+  useEffect(() => {
+    if (initialRecord) {
+      setAnalyzedRecord(initialRecord);
+      setImageDataUrl(initialRecord.comprobanteOriginalUrl || null);
+      if (initialRecord.clienteIdSugerido) setSelectedEntityId(initialRecord.clienteIdSugerido);
+      if (initialRecord.facturaIdSeleccionada) setSelectedInvoiceId(initialRecord.facturaIdSeleccionada);
+      if (initialRecord.tipoComprobante) setTipoComprobante(initialRecord.tipoComprobante);
+      if (initialRecord.bancoEmisor) setBancoEmisor(initialRecord.bancoEmisor);
+      if (initialRecord.bancoReceptor) setBancoReceptor(initialRecord.bancoReceptor);
+      if (initialRecord.numeroReferencia) setNumeroReferencia(initialRecord.numeroReferencia);
+      if (initialRecord.fechaComprobante) setFechaComprobante(initialRecord.fechaComprobante);
+      if (initialRecord.monedaOriginal) setMonedaOriginal(initialRecord.monedaOriginal);
+      if (initialRecord.montoOriginal) setMontoOriginal(initialRecord.montoOriginal);
+      if (initialRecord.tasaBcvSnapshot) setTasaBcvSnapshot(initialRecord.tasaBcvSnapshot);
+      if (initialRecord.notasRevision) setNotasRevision(initialRecord.notasRevision);
+    }
+  }, [initialRecord]);
+
+  // Auto-selección de entidad basada en teléfono si se provee
+  useEffect(() => {
+    if (initialClientPhone && entities.length > 0) {
+      const cleanPhone = initialClientPhone.replace(/\+/g, '');
+      const matched = entities.find(
+        (e) => (e.phone && e.phone.includes(cleanPhone)) || (e.telefonoContacto && e.telefonoContacto.includes(cleanPhone))
+      );
+      if (matched) {
+        setSelectedEntityId(matched.id);
+      }
+    }
+  }, [initialClientPhone, entities]);
+
+  // Manejo de pegado desde portapapeles (Ctrl + V)
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          const blob = items[i].getAsFile();
+          if (blob) {
+            const reader = new FileReader();
+            reader.onload = (event) => {
+              const dataUrl = event.target?.result as string;
+              setImageDataUrl(dataUrl);
+              setImageMimeType(blob.type);
+              setAnalyzedRecord(null);
+              setErrorMsg(null);
+            };
+            reader.readAsDataURL(blob);
+            break;
+          }
+        }
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [isOpen]);
+
+  // Facturas del cliente seleccionado
+  const clientPendingInvoices = useMemo(() => {
+    if (!selectedEntityId) return [];
+    return invoices.filter((inv) => inv.customerId === selectedEntityId && inv.paymentStatus !== 'PAGADO');
+  }, [invoices, selectedEntityId]);
+
+  // Auto-seleccionar primera factura pendiente si existe
+  useEffect(() => {
+    if (clientPendingInvoices.length > 0 && !selectedInvoiceId) {
+      setSelectedInvoiceId(clientPendingInvoices[0].id);
+    }
+  }, [clientPendingInvoices, selectedInvoiceId]);
+
+  // Cálculos bimonetarios reactivos exactos
+  const montoEquivalenteUSD = useMemo(() => {
+    const rate = tasaBcvSnapshot > 0 ? tasaBcvSnapshot : 1;
+    if (monedaOriginal === 'USD') return centsRound(montoOriginal);
+    return centsRound(montoOriginal / rate);
+  }, [montoOriginal, monedaOriginal, tasaBcvSnapshot]);
+
+  const montoEquivalenteVES = useMemo(() => {
+    const rate = tasaBcvSnapshot > 0 ? tasaBcvSnapshot : 1;
+    if (monedaOriginal === 'VES') return centsRound(montoOriginal);
+    return centsRound(montoOriginal * rate);
+  }, [montoOriginal, monedaOriginal, tasaBcvSnapshot]);
+
+  if (!isOpen) return null;
+
+  // Cargar archivo
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result as string;
+      setImageDataUrl(dataUrl);
+      setImageMimeType(file.type);
+      setAnalyzedRecord(null);
+      setErrorMsg(null);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  // Disparo 100% Manual Bajo Demanda del OCR Forense
+  const handleRunOcrAnalysis = async () => {
+    if (!imageDataUrl || isAnalyzing) return;
+
+    setIsAnalyzing(true);
+    setErrorMsg(null);
+
+    try {
+      const result = await OcrForensicService.analyzeReceiptImage(
+        imageDataUrl,
+        imageMimeType,
+        bcvRate,
+        existingRecords
+      );
+
+      setAnalyzedRecord(result);
+      setTipoComprobante(result.tipoComprobante);
+      setBancoEmisor(result.bancoEmisor || '');
+      setBancoReceptor(result.bancoReceptor || '');
+      setNumeroReferencia(result.numeroReferencia || '');
+      setFechaComprobante(result.fechaComprobante || new Date().toISOString().split('T')[0]);
+      setMonedaOriginal(result.monedaOriginal);
+      setMontoOriginal(result.montoOriginal);
+      setTasaBcvSnapshot(result.tasaBcvSnapshot);
+
+      // Intentar vincular cliente sugerido si existe coincidencia de RIF o Cédula
+      if (result.rifCedula && entities.length > 0) {
+        const cleanRif = result.rifCedula.replace(/[^0-9A-Za-z]/g, '').toLowerCase();
+        const found = entities.find((e) =>
+          e.rifCedula.replace(/[^0-9A-Za-z]/g, '').toLowerCase().includes(cleanRif)
+        );
+        if (found) {
+          setSelectedEntityId(found.id);
+        }
+      }
+    } catch (err: any) {
+      setErrorMsg(`Error ejecutando análisis forense OCR: ${err.message}`);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  // Guardar en Bandeja de Pre-Conciliación (sin conciliar aún)
+  const handleSaveToPendingTray = async () => {
+    if (!analyzedRecord) return;
+    setIsSaving(true);
+    setErrorMsg(null);
+
+    const recordToSave: PagoReportadoOCR = {
+      ...analyzedRecord,
+      clienteIdSugerido: selectedEntityId || undefined,
+      clienteNombreSugerido: entities.find((e) => e.id === selectedEntityId)?.name,
+      facturaIdSeleccionada: selectedInvoiceId || undefined,
+      facturaCodigoSeleccionada: invoices.find((i) => i.id === selectedInvoiceId)?.invoiceNumber,
+      tipoComprobante: tipoComprobante as any,
+      bancoEmisor,
+      bancoReceptor,
+      numeroReferencia,
+      referenciaNormalizada: numeroReferencia.toUpperCase().replace(/[^A-Z0-9]/g, ''),
+      monedaOriginal,
+      montoOriginal: centsRound(montoOriginal),
+      tasaBcvSnapshot,
+      montoEquivalenteUSD,
+      montoEquivalenteVES,
+      notasRevision,
+      updatedTimestamp: Date.now(),
+    };
+
+    const res = await OcrForensicService.saveReportedPayment(recordToSave);
+    setIsSaving(false);
+
+    if (res.success) {
+      setSuccessMsg('Comprobante guardado exitosamente en la Bandeja de Pre-Conciliación.');
+      setTimeout(() => {
+        onClose();
+      }, 1200);
+    } else {
+      setErrorMsg(`Error al guardar comprobante: ${res.error}`);
+    }
+  };
+
+  // CIERRE TRANSACCIONAL ATÓMICO: Conciliar y Cruzar Factura
+  const handleReconcileAndSettle = async () => {
+    if (!analyzedRecord) return;
+    setIsSaving(true);
+    setErrorMsg(null);
+
+    const entity = entities.find((e) => e.id === selectedEntityId);
+
+    // Guardar primero el registro en Firestore para asegurar que existe
+    const recordToSave: PagoReportadoOCR = {
+      ...analyzedRecord,
+      clienteIdSugerido: selectedEntityId || undefined,
+      clienteNombreSugerido: entity?.name,
+      facturaIdSeleccionada: selectedInvoiceId || undefined,
+      facturaCodigoSeleccionada: invoices.find((i) => i.id === selectedInvoiceId)?.invoiceNumber,
+      tipoComprobante: tipoComprobante as any,
+      bancoEmisor,
+      bancoReceptor,
+      numeroReferencia,
+      referenciaNormalizada: numeroReferencia.toUpperCase().replace(/[^A-Z0-9]/g, ''),
+      monedaOriginal,
+      montoOriginal: centsRound(montoOriginal),
+      tasaBcvSnapshot,
+      montoEquivalenteUSD,
+      montoEquivalenteVES,
+      notasRevision,
+      updatedTimestamp: Date.now(),
+    };
+
+    await OcrForensicService.saveReportedPayment(recordToSave);
+
+    const res = await OcrForensicService.approveAndReconcilePayment(analyzedRecord.id, {
+      invoiceId: selectedInvoiceId || undefined,
+      entityId: selectedEntityId || undefined,
+      entityName: entity?.name || 'Cliente Puro Apure',
+      bcvRate: tasaBcvSnapshot,
+      userId: userProfile?.uid || 'operador_finanzas',
+      userRole: role,
+      notasRevision,
+      justificacionSuperAdmin,
+    });
+
+    setIsSaving(false);
+
+    if (res.success) {
+      setSuccessMsg('¡Pago validado y CONCILIADO exitosamente! Factura cruzada en el libro mayor.');
+      if (onPaymentReconciled && res.paymentRecordId) {
+        onPaymentReconciled(res.paymentRecordId);
+      }
+      setTimeout(() => {
+        onClose();
+      }, 1500);
+    } else {
+      setErrorMsg(res.error || 'Error conciliando el pago.');
+    }
+  };
+
+  const dictamen = analyzedRecord?.dictamenVeracidad;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-slate-950/85 backdrop-blur-xs overflow-y-auto animate-in fade-in">
+      <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-5xl shadow-2xl overflow-hidden flex flex-col my-auto max-h-[92vh]">
+        {/* Cabecera del Modal */}
+        <div className="px-5 py-4 border-b border-slate-800 bg-slate-900/90 flex items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+              <Sparkles className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-bold text-white tracking-tight">
+                  Lector OCR Forense &amp; Pre-Conciliación de Pagos
+                </h3>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800 font-bold">
+                  Anti-IA &amp; Anti-Fraude
+                </span>
+              </div>
+              <p className="text-xs text-slate-400">
+                Verificación matemática e inspección de metadatos EXIF bajo demanda
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-white transition p-2 rounded-xl hover:bg-slate-800 cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Mensajes de Alerta / Éxito */}
+        {errorMsg && (
+          <div className="mx-5 mt-4 p-3.5 bg-rose-950/50 border border-rose-800/80 rounded-2xl text-rose-300 text-xs flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{errorMsg}</span>
+          </div>
+        )}
+        {successMsg && (
+          <div className="mx-5 mt-4 p-3.5 bg-emerald-950/50 border border-emerald-800/80 rounded-2xl text-emerald-300 text-xs flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{successMsg}</span>
+          </div>
+        )}
+
+        {/* CUERPO DIVIDIDO (SPLIT VIEW): Imagen vs Datos Extraídos */}
+        <div className="flex-1 overflow-y-auto p-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
+          {/* COLUMNA IZQUIERDA (5 COLS): Visor de Imagen y Semáforo de Veracidad */}
+          <div className="lg:col-span-5 space-y-4 flex flex-col">
+            {/* Contenedor de Captura / Imagen */}
+            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3 flex flex-col items-center justify-center relative overflow-hidden min-h-[260px]">
+              {imageDataUrl ? (
+                <div className="relative w-full flex flex-col items-center">
+                  <img
+                    src={imageDataUrl}
+                    alt="Comprobante a analizar"
+                    className={`rounded-xl object-contain transition-all ${
+                      isZoomed ? 'max-h-[500px] w-full' : 'max-h-64'
+                    }`}
+                  />
+                  <div className="absolute top-2 right-2 flex items-center gap-1.5 bg-slate-900/80 p-1 rounded-xl backdrop-blur-xs border border-slate-700">
+                    <button
+                      onClick={() => setIsZoomed(!isZoomed)}
+                      className="p-1.5 text-slate-300 hover:text-white"
+                      title="Expandir imagen"
+                    >
+                      <Maximize2 className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => {
+                        setImageDataUrl(null);
+                        setAnalyzedRecord(null);
+                      }}
+                      className="p-1.5 text-rose-400 hover:text-rose-200"
+                      title="Quitar imagen"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center p-6 space-y-3">
+                  <div className="w-12 h-12 rounded-2xl bg-purple-950/50 border border-purple-800/40 text-purple-400 mx-auto flex items-center justify-center">
+                    <Upload className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <strong className="text-xs text-white block">Cargue o Pegue el Comprobante</strong>
+                    <span className="text-[11px] text-slate-400">
+                      Soporta presionar <strong>Ctrl + V</strong> directamente, subir archivo o tomar foto
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-center gap-2 pt-2">
+                    <label className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition cursor-pointer min-h-[44px] flex items-center gap-1.5">
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Subir Imagen</span>
+                      <input type="file" accept="image/*" onChange={handleFileChange} className="hidden" />
+                    </label>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* BOTÓN DISPARO 100% MANUAL BAJO DEMANDA */}
+            {imageDataUrl && !analyzedRecord && (
+              <button
+                onClick={handleRunOcrAnalysis}
+                disabled={isAnalyzing}
+                className="w-full py-3 px-4 rounded-2xl bg-gradient-to-r from-emerald-600 via-emerald-500 to-teal-600 hover:opacity-95 text-white font-extrabold text-xs shadow-lg shadow-emerald-950/50 transition flex items-center justify-center gap-2 cursor-pointer min-h-[44px] disabled:opacity-50"
+              >
+                {isAnalyzing ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Ejecutando Peritaje Forense y OCR...</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    <span>🔍 Analizar con OCR y Verificar Autenticidad</span>
+                  </>
+                )}
+              </button>
+            )}
+
+            {/* SEMÁFORO Y CUATRO CANDADOS DE VERACIDAD (Si ya fue analizado) */}
+            {dictamen && (
+              <div
+                className={`p-4 rounded-2xl border space-y-3 ${
+                  dictamen.veredicto === 'AUTENTICO_ALTA_CONFIANZA'
+                    ? 'bg-emerald-950/20 border-emerald-500/40 text-emerald-200'
+                    : dictamen.veredicto === 'SOSPECHOSO_REVISION_HUMANA'
+                    ? 'bg-amber-950/20 border-amber-500/40 text-amber-200'
+                    : 'bg-rose-950/30 border-rose-500/50 text-rose-200'
+                }`}
+              >
+                {/* Cabecera del Semáforo */}
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800/60">
+                  <div className="flex items-center gap-2">
+                    {dictamen.veredicto === 'AUTENTICO_ALTA_CONFIANZA' ? (
+                      <ShieldCheck className="w-5 h-5 text-emerald-400" />
+                    ) : dictamen.veredicto === 'SOSPECHOSO_REVISION_HUMANA' ? (
+                      <AlertTriangle className="w-5 h-5 text-amber-400" />
+                    ) : (
+                      <ShieldAlert className="w-5 h-5 text-rose-400" />
+                    )}
+                    <div>
+                      <strong className="text-xs uppercase font-extrabold block">
+                        {dictamen.veredicto === 'AUTENTICO_ALTA_CONFIANZA'
+                          ? '🟢 Auténtico (Alta Confianza)'
+                          : dictamen.veredicto === 'SOSPECHOSO_REVISION_HUMANA'
+                          ? '🟡 Sospechoso (Revisión Manual)'
+                          : '🔴 Alerta Fraude / Edición / IA'}
+                      </strong>
+                      <span className="text-[10px] opacity-80">
+                        Score Forense: {dictamen.score} / 100 • {dictamen.tiempoAnalisisMs}ms
+                      </span>
+                    </div>
+                  </div>
+                  <span className="text-2xl font-black font-mono">{dictamen.score}%</span>
+                </div>
+
+                {/* Desglose de los 4 Candados */}
+                <div className="space-y-1.5 text-[11px] font-sans">
+                  <div className="flex items-start gap-1.5">
+                    <span className="font-bold">Candado 1:</span>
+                    <span className={dictamen.candado1_reciclaje.esDuplicado ? 'text-rose-400 font-bold' : 'opacity-85'}>
+                      {dictamen.candado1_reciclaje.detalle}
+                    </span>
+                  </div>
+                  <div className="flex items-start gap-1.5">
+                    <span className="font-bold">Candado 2:</span>
+                    <span className={dictamen.candado2_exif_ia.tieneFirmasIAOEdicion ? 'text-rose-400 font-bold' : 'opacity-85'}>
+                      {dictamen.candado2_exif_ia.detalle}
+                    </span>
+                  </div>
+                  <div className="flex items-start gap-1.5">
+                    <span className="font-bold">Candado 3:</span>
+                    <span className="opacity-85">{dictamen.candado3_visual_gemini.detalle}</span>
+                  </div>
+                  <div className="pt-1 text-[10px] font-mono opacity-60 truncate">
+                    SHA-256: {analyzedRecord.sha256Bytes.substring(0, 24)}...
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* COLUMNA DERECHA (7 COLS): Datos Extraídos y Pre-Conciliación Contable */}
+          <div className="lg:col-span-7 space-y-4">
+            <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 space-y-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-purple-300 flex items-center gap-1.5">
+                <Receipt className="w-4 h-4 text-purple-400" />
+                <span>Datos del Comprobante &amp; Cruce Contable</span>
+              </h4>
+
+              {/* Fila 1: Selección de Cliente y Factura */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] font-semibold text-slate-300 block mb-1">
+                    Cliente / Entidad Asociada *
+                  </label>
+                  <select
+                    value={selectedEntityId}
+                    onChange={(e) => {
+                      setSelectedEntityId(e.target.value);
+                      setSelectedInvoiceId('');
+                    }}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500 min-h-[44px]"
+                  >
+                    <option value="">-- Seleccionar Cliente --</option>
+                    {entities.map((ent) => (
+                      <option key={ent.id} value={ent.id}>
+                        {ent.nombre} ({ent.rifCedula})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-semibold text-slate-300 block mb-1">
+                    Factura Pendiente a Cruzar
+                  </label>
+                  <select
+                    value={selectedInvoiceId}
+                    onChange={(e) => setSelectedInvoiceId(e.target.value)}
+                    disabled={!selectedEntityId || clientPendingInvoices.length === 0}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-500 min-h-[44px] disabled:opacity-50"
+                  >
+                    <option value="">-- Cruce como Anticipo Libre --</option>
+                    {clientPendingInvoices.map((inv) => (
+                      <option key={inv.id} value={inv.id}>
+                        {inv.invoiceNumber || inv.id} • Saldo: ${Number(inv.saldoPendienteUSD !== undefined ? inv.saldoPendienteUSD : inv.totalUSD).toFixed(2)} USD
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Fila 2: Modalidad, Bancos y Referencia */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-[11px] font-semibold text-slate-300 block mb-1">Modalidad</label>
+                  <select
+                    value={tipoComprobante}
+                    onChange={(e) => setTipoComprobante(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white min-h-[44px]"
+                  >
+                    <option value="PAGO_MOVIL">Pago Móvil</option>
+                    <option value="TRANSFERENCIA">Transferencia Bancaria</option>
+                    <option value="ZELLE">Zelle</option>
+                    <option value="CRIPTOACTIVOS">Criptoactivos / Binance</option>
+                    <option value="RETENCION_FISCAL">Retención Fiscal SENIAT</option>
+                    <option value="RIF">Comprobante RIF</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-semibold text-slate-300 block mb-1">Banco Emisor</label>
+                  <input
+                    type="text"
+                    value={bancoEmisor}
+                    onChange={(e) => setBancoEmisor(e.target.value)}
+                    placeholder="ej. Banesco"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white min-h-[44px]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-semibold text-slate-300 block mb-1">N° Referencia *</label>
+                  <input
+                    type="text"
+                    value={numeroReferencia}
+                    onChange={(e) => setNumeroReferencia(e.target.value)}
+                    placeholder="Referencia numérica"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white font-mono min-h-[44px]"
+                  />
+                </div>
+              </div>
+
+              {/* Fila 3: Montos, Moneda y Tasa BCV Snapshot */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-[11px] font-semibold text-slate-300 block mb-1">Moneda Original</label>
+                  <select
+                    value={monedaOriginal}
+                    onChange={(e) => setMonedaOriginal(e.target.value as 'VES' | 'USD')}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white min-h-[44px]"
+                  >
+                    <option value="VES">Bolívares (VES)</option>
+                    <option value="USD">Dólares (USD)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-semibold text-slate-300 block mb-1">Monto Comprobante *</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={montoOriginal || ''}
+                    onChange={(e) => setMontoOriginal(parseFloat(e.target.value) || 0)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white font-mono min-h-[44px]"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-semibold text-slate-300 block mb-1">
+                    Tasa BCV Congelada (VES/USD)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={tasaBcvSnapshot}
+                    onChange={(e) => setTasaBcvSnapshot(parseFloat(e.target.value) || 1)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white font-mono min-h-[44px]"
+                  />
+                </div>
+              </div>
+
+              {/* Conversión Exacta en Vivo */}
+              <div className="p-3 bg-slate-900 rounded-xl border border-slate-800 flex items-center justify-between text-xs font-mono">
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Equivalente USD Contable:</span>
+                  <span className="text-base font-bold text-emerald-400">
+                    ${montoEquivalenteUSD.toFixed(2)} USD
+                  </span>
+                </div>
+                <div className="text-right">
+                  <span className="text-[10px] text-slate-400 block">Equivalente VES:</span>
+                  <span className="text-base font-bold text-white">
+                    Bs. {montoEquivalenteVES.toFixed(2)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Campo Abierto de Observaciones */}
+              <div>
+                <label className="text-[11px] font-semibold text-slate-300 block mb-1">
+                  Observaciones de Auditoría (notas_revision)
+                </label>
+                <textarea
+                  rows={2}
+                  placeholder="Detalles sobre el titular, notas de conciliación o retenciones SENIAT..."
+                  value={notasRevision}
+                  onChange={(e) => setNotasRevision(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+                />
+              </div>
+
+              {/* Justificación de Excepción si el semáforo es ALERTA_FRAUDE */}
+              {dictamen?.veredicto === 'ALERTA_FRAUDE_EDICION_O_IA' && (
+                <div className="p-3 bg-rose-950/40 border border-rose-800/80 rounded-xl space-y-2">
+                  <div className="flex items-center gap-2 text-rose-300 font-bold text-xs">
+                    <Lock className="w-4 h-4 text-rose-400" />
+                    <span>Autorización Exclusiva de SuperAdmin Requerida</span>
+                  </div>
+                  <p className="text-[11px] text-rose-200">
+                    Este comprobante posee alerta roja. Para forzar su conciliación en el libro contable, debe ingresar una justificación detallada.
+                  </p>
+                  <textarea
+                    rows={2}
+                    placeholder="Motivo de aprobación manual bajo riesgo del auditor..."
+                    value={justificacionSuperAdmin}
+                    onChange={(e) => setJustificacionSuperAdmin(e.target.value)}
+                    disabled={!isSuperAdmin}
+                    className="w-full bg-slate-950 border border-rose-800 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 disabled:opacity-50"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* BOTONES FINALES DE ACCIÓN */}
+            <div className="flex flex-col sm:flex-row items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={handleSaveToPendingTray}
+                disabled={!analyzedRecord || isSaving}
+                className="w-full sm:w-auto px-4 py-2.5 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold transition cursor-pointer min-h-[44px] disabled:opacity-50"
+              >
+                Guardar en Bandeja Pre-Conciliación
+              </button>
+
+              <button
+                type="button"
+                onClick={handleReconcileAndSettle}
+                disabled={
+                  !analyzedRecord ||
+                  isSaving ||
+                  !numeroReferencia.trim() ||
+                  montoOriginal <= 0 ||
+                  (dictamen?.veredicto === 'ALERTA_FRAUDE_EDICION_O_IA' && !isSuperAdmin)
+                }
+                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold shadow-lg shadow-purple-950/50 transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isSaving ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Conciliando en Libro Mayor...</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Registrar Pago Conciliado y Cruzar Factura</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+```
+
+---
+
+### ARCHIVO 3 DE 4: `src/components/crm/WhatsAppWebCloneView.tsx`
+```tsx
+/**
+ * Componente: Clon de WhatsApp Web en Vivo con Conexión por QR (CRM / BRM)
+ * Puro Apure ERP - Módulo de Mensajería Bidireccional
+ * 3 Paneles (Directorio/Chats, Conversación Espejo, Expediente 360°)
+ * 100% Nativo React, Responsive Mobile 375px+, Touch Targets >= 44x44px
+ */
+
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  MessageSquare,
+  QrCode,
+  Send,
+  Paperclip,
+  Search,
+  Sparkles,
+  ExternalLink,
+  ShieldCheck,
+  AlertCircle,
+  Clock,
+  Check,
+  CheckCheck,
+  Phone,
+  User,
+  Building2,
+  Receipt,
+  DollarSign,
+  Calendar,
+  FileText,
+  FileSpreadsheet,
+  X,
+  RefreshCw,
+  Image as ImageIcon,
+  ChevronRight,
+  SlidersHorizontal,
+  Bot,
+  Zap,
+} from 'lucide-react';
+import {
+  WhatsAppLine,
+  WhatsAppMessage,
+  WhatsAppTemplate,
+  WhatsAppChatContact,
+  WhatsAppLineType,
+} from '../../types/crmWhatsapp';
+import { WhatsAppCloneService, normalizeToE164 } from '../../services/whatsappCloneService';
+import { DualEntity, BillingInvoice } from '../../types/finance';
+import { centsRound } from '../../services/financialAnalyticsService';
+
+interface WhatsAppWebCloneViewProps {
+  entities: DualEntity[];
+  invoices: BillingInvoice[];
+  bcvRate: number;
+  onAnalyzeReceiptOCR?: (imageDataUrl: string, contact?: WhatsAppChatContact) => void;
+  onNavigateToFinance?: () => void;
+}
+
+export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
+  entities,
+  invoices,
+  bcvRate,
+  onAnalyzeReceiptOCR,
+  onNavigateToFinance,
+}) => {
+  // 1. Estado de Líneas y Conectividad
+  const [lines, setLines] = useState<WhatsAppLine[]>([]);
+  const [activeLineId, setActiveLineId] = useState<string>('linea_cobranzas');
+  const [showQrModal, setShowQrModal] = useState<boolean>(false);
+  const [pairingPhone, setPairingPhone] = useState<string>('');
+  const [qrDataUri, setQrDataUri] = useState<string | null>(null);
+  const [isGeneratingQr, setIsGeneratingQr] = useState<boolean>(false);
+  const [isHybridMode, setIsHybridMode] = useState<boolean>(false);
+
+  // 2. Estado de Directorio y Chats
+  const [selectedContactPhone, setSelectedContactPhone] = useState<string>('');
+  const [searchFilter, setSearchFilter] = useState<string>('');
+  const [activeCategoryFilter, setActiveCategoryFilter] = useState<
+    'TODOS' | 'CLIENTES' | 'PROVEEDORES' | 'DUAL' | 'CON_PAGO'
+  >('TODOS');
+
+  // 3. Estado de Mensajes
+  const [messages, setMessages] = useState<WhatsAppMessage[]>([]);
+  const [messageInput, setMessageInput] = useState<string>('');
+  const [isSending, setIsSending] = useState<boolean>(false);
+  const [showTemplatesModal, setShowTemplatesModal] = useState<boolean>(false);
+  const [templates, setTemplates] = useState<WhatsAppTemplate[]>([]);
+
+  // 4. Modo Móvil (Pestañas en pantalla < 768px)
+  const [mobileTab, setMobileTab] = useState<'CHATS' | 'CONVERSACION' | 'EXPEDIENTE'>('CHATS');
+
+  // 5. Referencia al contenedor de mensajes para autoscroll
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Inicializar líneas y plantillas
+  useEffect(() => {
+    WhatsAppCloneService.initializeDefaultLines().then((def) => setLines(def));
+    WhatsAppCloneService.getTemplates().then((tpls) => setTemplates(tpls));
+
+    const unsubLines = WhatsAppCloneService.subscribeWhatsAppLines((updatedLines) => {
+      setLines(updatedLines);
+    });
+
+    return () => {
+      unsubLines();
+    };
+  }, []);
+
+  // Línea actualmente activa
+  const activeLine = useMemo(() => {
+    return lines.find((l) => l.id === activeLineId) || lines[0] || null;
+  }, [lines, activeLineId]);
+
+  // Construir Directorio de Contactos a partir de entidades y mensajes
+  const contactList = useMemo(() => {
+    const list: WhatsAppChatContact[] = [];
+
+    // Agregar contactos basados en entidades del ERP
+    for (const ent of entities) {
+      const rawPhone = ent.phone || ent.telefonoContacto;
+      if (!rawPhone) continue;
+      const normPhone = normalizeToE164(rawPhone);
+      // Calcular facturas pendientes del cliente
+      const clientInvoices = invoices.filter(
+        (inv) => inv.customerId === ent.id && inv.paymentStatus !== 'PAGADO'
+      );
+      const pendingTotalUSD = clientInvoices.reduce(
+        (sum, inv) => sum + (Number(inv.saldoPendienteUSD !== undefined ? inv.saldoPendienteUSD : inv.totalUSD) || 0),
+        0
+      );
+
+      list.push(
+        WhatsAppCloneService.enrichContactWithERP(
+          normPhone,
+          entities,
+          centsRound(pendingTotalUSD),
+          0
+        )
+      );
+    }
+
+    return list;
+  }, [entities, invoices]);
+
+  // Filtrado de contactos
+  const filteredContacts = useMemo(() => {
+    return contactList.filter((c) => {
+      if (searchFilter.trim()) {
+        const q = searchFilter.toLowerCase();
+        const matchesName = c.nombreDisplay.toLowerCase().includes(q);
+        const matchesPhone = c.telefonoE164.includes(q);
+        if (!matchesName && !matchesPhone) return false;
+      }
+
+      if (activeCategoryFilter === 'CLIENTES' && c.entityRole !== 'CLIENTE' && c.entityRole !== 'DUAL') {
+        return false;
+      }
+      if (activeCategoryFilter === 'PROVEEDORES' && c.entityRole !== 'PROVEEDOR' && c.entityRole !== 'DUAL') {
+        return false;
+      }
+      if (activeCategoryFilter === 'DUAL' && c.entityRole !== 'DUAL') {
+        return false;
+      }
+      if (activeCategoryFilter === 'CON_PAGO' && c.estadoSolvencia !== 'EN_MORA') {
+        return false;
+      }
+
+      return true;
+    });
+  }, [contactList, searchFilter, activeCategoryFilter]);
+
+  // Auto-seleccionar primer contacto si no hay uno seleccionado
+  useEffect(() => {
+    if (!selectedContactPhone && filteredContacts.length > 0) {
+      setSelectedContactPhone(filteredContacts[0].telefonoE164);
+    }
+  }, [filteredContacts, selectedContactPhone]);
+
+  // Contacto seleccionado actualmente
+  const selectedContact = useMemo(() => {
+    return (
+      contactList.find((c) => c.telefonoE164 === selectedContactPhone) ||
+      (selectedContactPhone
+        ? WhatsAppCloneService.enrichContactWithERP(selectedContactPhone, entities)
+        : null)
+    );
+  }, [contactList, selectedContactPhone, entities]);
+
+  // Facturas del contacto seleccionado
+  const selectedContactInvoices = useMemo(() => {
+    if (!selectedContact?.entityId) return [];
+    return invoices.filter((inv) => inv.customerId === selectedContact.entityId);
+  }, [invoices, selectedContact]);
+
+  // Suscribir mensajes del chat seleccionado
+  useEffect(() => {
+    if (!activeLineId || !selectedContactPhone) {
+      setMessages([]);
+      return;
+    }
+
+    const unsub = WhatsAppCloneService.subscribeChatMessages(
+      activeLineId,
+      selectedContactPhone,
+      (newMsgs) => {
+        setMessages(newMsgs);
+        setTimeout(() => {
+          messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 150);
+      }
+    );
+
+    return () => {
+      unsub();
+    };
+  }, [activeLineId, selectedContactPhone]);
+
+  // Enviar mensaje
+  const handleSendMessage = async (textToSend?: string) => {
+    const text = (textToSend || messageInput).trim();
+    if (!text || !selectedContactPhone || isSending) return;
+
+    setIsSending(true);
+    const res = await WhatsAppCloneService.sendWhatsAppMessage(
+      activeLineId,
+      activeLine?.numeroTelefono || '+584140000001',
+      selectedContactPhone,
+      text,
+      'TEXTO'
+    );
+
+    setIsSending(false);
+    if (res.success) {
+      setMessageInput('');
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      }, 100);
+    }
+  };
+
+  // Adjuntar imagen (comprobante)
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !selectedContactPhone) return;
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUri = reader.result as string;
+      await WhatsAppCloneService.sendWhatsAppMessage(
+        activeLineId,
+        activeLine?.numeroTelefono || '+584140000001',
+        selectedContactPhone,
+        `[Adjunto: ${file.name}]`,
+        'IMAGEN',
+        dataUri,
+        file.type
+      );
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  // Abrir modal QR
+  const handleOpenQrModal = async () => {
+    setIsGeneratingQr(true);
+    setShowQrModal(true);
+    try {
+      const res = await fetch(`/api/whatsapp/qr?lineaId=${activeLineId}`).then((r) => r.json());
+      if (res.success && res.qrDataUri) {
+        setQrDataUri(res.qrDataUri);
+      }
+    } catch {
+      // Fallback local QR
+      setQrDataUri(
+        'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="%23065F46"/></svg>'
+      );
+    } finally {
+      setIsGeneratingQr(false);
+    }
+  };
+
+  // Confirmar vinculación QR simulada
+  const handleConfirmPairing = async () => {
+    const phone = pairingPhone.trim() || activeLine?.numeroTelefono || '+584149998877';
+    await WhatsAppCloneService.updateLineStatus(activeLineId, 'CONECTADO');
+    setShowQrModal(false);
+    setQrDataUri(null);
+  };
+
+  // Aplicar plantilla seleccionada
+  const handleSelectTemplate = (tpl: WhatsAppTemplate) => {
+    if (!selectedContact) return;
+    const inv = selectedContactInvoices[0];
+    const rendered = WhatsAppCloneService.renderTemplate(tpl.textoPlantilla, {
+      cliente: selectedContact.nombreDisplay,
+      factura: inv ? inv.invoiceNumber || inv.id : 'N/A',
+      monto_usd: inv
+        ? (inv.saldoPendienteUSD !== undefined ? inv.saldoPendienteUSD : inv.totalUSD)
+        : (selectedContact.deudaTotalUSD || 0),
+      monto_ves: inv
+        ? centsRound(Number(inv.saldoPendienteUSD !== undefined ? inv.saldoPendienteUSD : inv.totalUSD) * (bcvRate || 1))
+        : centsRound(Number(selectedContact.deudaTotalUSD || 0) * (bcvRate || 1)),
+      fecha_vencimiento: inv?.dueDate || new Date().toISOString().split('T')[0],
+    });
+    setMessageInput(rendered);
+    setShowTemplatesModal(false);
+  };
+
+  return (
+    <div className="flex flex-col h-[calc(100vh-140px)] min-h-[580px] bg-slate-950 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl">
+      {/* 1. CABECERA SUPERIOR: Selector de Línea, Estado QR y Modo Híbrido */}
+      <div className="bg-slate-900 border-b border-slate-800 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+            <MessageSquare className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-bold text-white tracking-tight">
+                Puro Apure WhatsApp Web en Vivo
+              </h2>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800">
+                CRM / BRM Sync
+              </span>
+            </div>
+            <p className="text-xs text-slate-400">
+              Gestión directa de Cobranzas, Ventas y Proveedores sin APIs externas de pago
+            </p>
+          </div>
+        </div>
+
+        {/* Selector de Línea Operativa */}
+        <div className="flex items-center gap-2">
+          <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800">
+            {lines.map((l) => (
+              <button
+                key={l.id}
+                onClick={() => setActiveLineId(l.id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 min-h-[38px] ${
+                  activeLineId === l.id
+                    ? 'bg-purple-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    l.estado === 'CONECTADO' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                  }`}
+                />
+                <span>{l.nombre.replace('Línea de ', '')}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Botón Escanear QR */}
+          <button
+            onClick={handleOpenQrModal}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition min-h-[44px] cursor-pointer"
+            title="Vincular o Reconectar sesión mediante Código QR"
+          >
+            <QrCode className="w-4 h-4 text-emerald-400" />
+            <span className="hidden sm:inline">Vincular QR</span>
+          </button>
+
+          {/* Conmutador Modo Híbrido wa.me */}
+          <button
+            onClick={() => setIsHybridMode(!isHybridMode)}
+            className={`p-2 rounded-xl border text-xs font-semibold transition min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer ${
+              isHybridMode
+                ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
+                : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
+            }`}
+            title="Alternar Modo Híbrido Directo wa.me para contingencia móvil"
+          >
+            <ExternalLink className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Pestañas Móviles (< 768px) */}
+      <div className="flex md:hidden bg-slate-900/90 border-b border-slate-800 p-1 text-xs">
+        <button
+          onClick={() => setMobileTab('CHATS')}
+          className={`flex-1 py-2 text-center font-bold rounded-lg transition min-h-[44px] ${
+            mobileTab === 'CHATS' ? 'bg-purple-600 text-white' : 'text-slate-400'
+          }`}
+        >
+          Chats ({filteredContacts.length})
+        </button>
+        <button
+          onClick={() => setMobileTab('CONVERSACION')}
+          className={`flex-1 py-2 text-center font-bold rounded-lg transition min-h-[44px] ${
+            mobileTab === 'CONVERSACION' ? 'bg-purple-600 text-white' : 'text-slate-400'
+          }`}
+        >
+          Conversación
+        </button>
+        <button
+          onClick={() => setMobileTab('EXPEDIENTE')}
+          className={`flex-1 py-2 text-center font-bold rounded-lg transition min-h-[44px] ${
+            mobileTab === 'EXPEDIENTE' ? 'bg-purple-600 text-white' : 'text-slate-400'
+          }`}
+        >
+          Expediente 360°
+        </button>
+      </div>
+
+      {/* 2. ÁREA PRINCIPAL: 3 COLUMNAS RESPONSIVAS */}
+      <div className="flex flex-1 overflow-hidden relative">
+        {/* COLUMNA 1: DIRECTORIO DE CHATS */}
+        <div
+          className={`w-full md:w-80 lg:w-96 border-r border-slate-800 bg-slate-900/40 flex flex-col ${
+            mobileTab === 'CHATS' ? 'flex' : 'hidden md:flex'
+          }`}
+        >
+          {/* Buscador de Contactos */}
+          <div className="p-3 border-b border-slate-800 space-y-2">
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3 pointer-events-none" />
+              <input
+                type="text"
+                placeholder="Buscar cliente, proveedor o +58..."
+                value={searchFilter}
+                onChange={(e) => setSearchFilter(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500 transition min-h-[40px]"
+              />
+            </div>
+
+            {/* Pestañas de Filtro Rápido */}
+            <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[11px] scrollbar-none">
+              {(['TODOS', 'CLIENTES', 'PROVEEDORES', 'DUAL', 'CON_PAGO'] as const).map((cat) => (
+                <button
+                  key={cat}
+                  onClick={() => setActiveCategoryFilter(cat)}
+                  className={`px-2.5 py-1 rounded-lg font-semibold whitespace-nowrap transition cursor-pointer min-h-[32px] ${
+                    activeCategoryFilter === cat
+                      ? 'bg-purple-600 text-white shadow'
+                      : 'bg-slate-800/60 text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {cat === 'TODOS'
+                    ? 'Todos'
+                    : cat === 'CLIENTES'
+                    ? 'Clientes'
+                    : cat === 'PROVEEDORES'
+                    ? 'BRM'
+                    : cat === 'DUAL'
+                    ? 'Rol Dual'
+                    : 'En Mora'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Lista de Conversaciones */}
+          <div className="flex-1 overflow-y-auto divide-y divide-slate-800/50">
+            {filteredContacts.length === 0 ? (
+              <div className="p-8 text-center text-slate-500 text-xs italic">
+                No hay contactos registrados que coincidan con la búsqueda.
+              </div>
+            ) : (
+              filteredContacts.map((contact) => {
+                const isSelected = selectedContactPhone === contact.telefonoE164;
+                return (
+                  <div
+                    key={contact.telefonoE164}
+                    onClick={() => {
+                      setSelectedContactPhone(contact.telefonoE164);
+                      setMobileTab('CONVERSACION');
+                    }}
+                    className={`p-3 transition cursor-pointer flex items-start gap-3 min-h-[64px] ${
+                      isSelected
+                        ? 'bg-slate-800/80 border-l-4 border-purple-500'
+                        : 'hover:bg-slate-800/30'
+                    }`}
+                  >
+                    <div className="w-10 h-10 rounded-2xl bg-purple-950/60 border border-purple-500/30 flex items-center justify-center text-purple-300 font-bold text-xs shrink-0 mt-0.5">
+                      {contact.entityRole === 'PROVEEDOR' ? (
+                        <Building2 className="w-4 h-4 text-emerald-400" />
+                      ) : contact.entityRole === 'DUAL' ? (
+                        <Zap className="w-4 h-4 text-cyan-400" />
+                      ) : (
+                        <User className="w-4 h-4 text-purple-400" />
+                      )}
+                    </div>
+
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="font-semibold text-white text-xs truncate">
+                          {contact.nombreDisplay}
+                        </span>
+                        {contact.estadoSolvencia === 'EN_MORA' && (
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-800 shrink-0 font-bold">
+                            ${contact.deudaTotalUSD?.toFixed(0)}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
+                        <span className="font-mono text-[10px] truncate">{contact.telefonoE164}</span>
+                        <span
+                          className={`text-[9px] uppercase font-bold px-1.5 py-0.2 rounded ${
+                            contact.entityRole === 'DUAL'
+                              ? 'bg-cyan-950 text-cyan-300 border border-cyan-800'
+                              : contact.entityRole === 'PROVEEDOR'
+                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                              : 'bg-slate-800 text-slate-400'
+                          }`}
+                        >
+                          {contact.entityRole}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        {/* COLUMNA 2: CONVERSACIÓN ESPEJO WHATSAPP */}
+        <div
+          className={`flex-1 flex flex-col bg-slate-950 ${
+            mobileTab === 'CONVERSACION' ? 'flex' : 'hidden md:flex'
+          }`}
+        >
+          {selectedContact ? (
+            <>
+              {/* Encabezado del Chat Seleccionado */}
+              <div className="p-3 border-b border-slate-800 bg-slate-900/60 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-purple-950 border border-purple-500/30 flex items-center justify-center text-purple-300 text-xs font-bold">
+                    {selectedContact.nombreDisplay.substring(0, 2).toUpperCase()}
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-bold text-white flex items-center gap-2">
+                      <span>{selectedContact.nombreDisplay}</span>
+                      <span className="text-[10px] font-mono font-normal text-slate-400">
+                        {selectedContact.telefonoE164}
+                      </span>
+                    </h3>
+                    <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                      <span className="flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                        Línea activa: {activeLine?.nombre}
+                      </span>
+                      {selectedContact.estadoSolvencia === 'EN_MORA' && (
+                        <span className="text-rose-400 font-bold">
+                          • Saldo Pendiente: ${selectedContact.deudaTotalUSD?.toFixed(2)} USD
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {/* Botón Plantillas Inteligentes */}
+                  <button
+                    onClick={() => setShowTemplatesModal(true)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-950/70 hover:bg-purple-900/80 text-purple-300 border border-purple-700 text-xs font-semibold transition min-h-[38px] cursor-pointer"
+                    title="Insertar Plantilla Oficial de Cobranza o Facturación"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                    <span className="hidden sm:inline">Plantillas</span>
+                  </button>
+
+                  {/* Botón wa.me directo */}
+                  <a
+                    href={WhatsAppCloneService.generateWaMeLink(selectedContact.telefonoE164, messageInput)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-2 rounded-xl bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-800 transition min-h-[38px] min-w-[38px] flex items-center justify-center cursor-pointer"
+                    title="Abrir directamente en aplicación WhatsApp (wa.me)"
+                  >
+                    <ExternalLink className="w-4 h-4 text-emerald-400" />
+                  </a>
+
+                  {/* Botón Ver Expediente 360 en móvil */}
+                  <button
+                    onClick={() => setMobileTab('EXPEDIENTE')}
+                    className="md:hidden p-2 rounded-xl bg-slate-800 text-slate-300 border border-slate-700 min-h-[38px]"
+                  >
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Burbujas de Conversación */}
+              <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:16px_16px]">
+                {messages.length === 0 ? (
+                  <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500">
+                    <MessageSquare className="w-12 h-12 text-slate-700 mb-2" />
+                    <p className="text-xs font-semibold text-slate-400">
+                      No hay mensajes previos en este hilo de conversación.
+                    </p>
+                    <p className="text-[11px] text-slate-500 max-w-sm mt-1">
+                      Escriba un mensaje o inserte una Plantilla Inteligente de Cobranza/Facturación para iniciar el contacto.
+                    </p>
+                  </div>
+                ) : (
+                  messages.map((msg) => {
+                    const isOutgoing = msg.direccion === 'SALIENTE';
+                    return (
+                      <div
+                        key={msg.id}
+                        className={`flex flex-col ${isOutgoing ? 'items-end' : 'items-start'}`}
+                      >
+                        <div
+                          className={`max-w-[85%] sm:max-w-[70%] rounded-2xl p-3 shadow-md relative ${
+                            isOutgoing
+                              ? 'bg-purple-700 text-white rounded-tr-none'
+                              : 'bg-slate-900 text-slate-200 border border-slate-800 rounded-tl-none'
+                          }`}
+                        >
+                          {/* Adjunto de Imagen / Comprobante */}
+                          {msg.mediaUrl && (
+                            <div className="mb-2 rounded-xl overflow-hidden border border-slate-700 bg-slate-950">
+                              <img
+                                src={msg.mediaUrl}
+                                alt="Evidencia de Pago"
+                                className="w-full max-h-60 object-contain"
+                              />
+                              {/* Botón Disparo Directo a OCR */}
+                              <div className="p-2 bg-slate-900 flex items-center justify-between gap-2 border-t border-slate-800">
+                                <span className="text-[10px] text-slate-400 font-mono">
+                                   Evidencia de Pago Recibida
+                                </span>
+                                <button
+                                  onClick={() => {
+                                    if (onAnalyzeReceiptOCR && msg.mediaUrl) {
+                                      onAnalyzeReceiptOCR(msg.mediaUrl, selectedContact);
+                                    }
+                                  }}
+                                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 shadow transition cursor-pointer min-h-[32px]"
+                                >
+                                  <Sparkles className="w-3 h-3" />
+                                  <span>🔍 Analizar con OCR</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Texto del Mensaje */}
+                          <p className="text-xs whitespace-pre-wrap leading-relaxed font-sans">
+                            {msg.texto}
+                          </p>
+
+                          {/* Pie de Mensaje: Hora y Ticks de Entrega */}
+                          <div
+                            className={`flex items-center justify-end gap-1 text-[9px] font-mono mt-1 ${
+                              isOutgoing ? 'text-purple-200' : 'text-slate-500'
+                            }`}
+                          >
+                            <span>
+                              {new Date(msg.timestamp).toLocaleTimeString('es-VE', {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </span>
+                            {isOutgoing && (
+                              <span>
+                                {msg.estado === 'LEIDO' ? (
+                                  <CheckCheck className="w-3 h-3 text-cyan-300" />
+                                ) : msg.estado === 'ENTREGADO' ? (
+                                  <CheckCheck className="w-3 h-3 text-purple-300" />
+                                ) : (
+                                  <Check className="w-3 h-3 text-purple-300" />
+                                )}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* Barra Inferior de Entrada y Envío */}
+              <div className="p-3 border-t border-slate-800 bg-slate-900/80 flex items-center gap-2">
+                {/* Botón Adjuntar */}
+                <label className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center transition">
+                  <Paperclip className="w-4 h-4" />
+                  <input
+                    type="file"
+                    accept="image/*,.pdf"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                  />
+                </label>
+
+                {/* Input de Mensaje */}
+                <input
+                  type="text"
+                  placeholder="Escriba un mensaje (Presione Enter para enviar)..."
+                  value={messageInput}
+                  onChange={(e) => setMessageInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSendMessage();
+                    }
+                  }}
+                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-purple-500 transition min-h-[44px]"
+                />
+
+                {/* Botón Enviar */}
+                <button
+                  onClick={() => handleSendMessage()}
+                  disabled={!messageInput.trim() || isSending}
+                  className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-lg shadow-purple-950/50 transition cursor-pointer min-h-[44px] flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <Send className="w-4 h-4" />
+                  <span className="hidden sm:inline">Enviar</span>
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="h-full flex flex-col items-center justify-center text-center p-8 text-slate-500">
+              <MessageSquare className="w-16 h-16 text-slate-800 mb-3" />
+              <h3 className="text-sm font-bold text-slate-400">Seleccione un chat</h3>
+              <p className="text-xs text-slate-500 max-w-xs mt-1">
+                Elija un cliente o proveedor del directorio para iniciar la conversación sincronizada.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* COLUMNA 3: EXPEDIENTE 360° Y CRUCE DE CUENTAS */}
+        <div
+          className={`w-full md:w-80 lg:w-88 border-l border-slate-800 bg-slate-900/60 p-4 overflow-y-auto space-y-4 ${
+            mobileTab === 'EXPEDIENTE' ? 'flex flex-col' : 'hidden lg:flex flex-col'
+          }`}
+        >
+          <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+              <Receipt className="w-4 h-4 text-purple-400" />
+              <span>Expediente 360° ERP</span>
+            </h3>
+            {selectedContact?.estadoSolvencia && (
+              <span
+                className={`text-[10px] font-mono px-2 py-0.5 rounded-full font-bold ${
+                  selectedContact.estadoSolvencia === 'EN_MORA'
+                    ? 'bg-rose-950 text-rose-300 border border-rose-800'
+                    : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                }`}
+              >
+                {selectedContact.estadoSolvencia}
+              </span>
+            )}
+          </div>
+
+          {selectedContact ? (
+            <>
+              {/* Tarjetas de Saldos y Límite de Crédito */}
+              <div className="space-y-2">
+                <div className="p-3 bg-slate-950 rounded-2xl border border-slate-800">
+                  <span className="text-[10px] font-mono uppercase text-slate-400 block font-bold">
+                    Deuda Total en Facturas
+                  </span>
+                  <span className="text-xl font-black font-mono text-rose-400 tabular-nums">
+                    ${(selectedContact.deudaTotalUSD || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })} USD
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-500 block mt-0.5">
+                    Bs. {((selectedContact.deudaTotalUSD || 0) * (bcvRate || 1)).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                  <div className="p-2.5 bg-slate-950 rounded-xl border border-slate-800">
+                    <span className="text-[9px] text-slate-400 block">Límite Crédito</span>
+                    <strong className="text-white">
+                      ${(selectedContact.limiteCreditoUSD || 0).toLocaleString()}
+                    </strong>
+                  </div>
+                  <div className="p-2.5 bg-slate-950 rounded-xl border border-slate-800">
+                    <span className="text-[9px] text-slate-400 block">Rol Directivo</span>
+                    <strong className="text-purple-300">{selectedContact.entityRole}</strong>
+                  </div>
+                </div>
+
+                {/* Rol Dual: Compensación de Cuentas */}
+                {selectedContact.entityRole === 'DUAL' && (
+                  <div className="p-2.5 bg-cyan-950/30 rounded-xl border border-cyan-800/40 text-xs">
+                    <span className="text-[10px] font-bold text-cyan-300 block mb-1">
+                      ⚡ Compensación Rol Dual (Cruce)
+                    </span>
+                    <div className="flex justify-between text-slate-300 font-mono text-[11px]">
+                      <span>Por Pagar:</span>
+                      <span>${(selectedContact.cuentasPorPagarUSD || 0).toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between text-cyan-400 font-bold font-mono text-[11px] pt-1 border-t border-cyan-900/50 mt-1">
+                      <span>Saldo Neto:</span>
+                      <span>${(selectedContact.saldoNetoCompensadoUSD || 0).toFixed(2)}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Lista de Facturas Pendientes */}
+              <div className="space-y-2">
+                <span className="text-[11px] font-bold text-slate-300 block">
+                  Facturas Pendientes ({selectedContactInvoices.length})
+                </span>
+
+                <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                  {selectedContactInvoices.length === 0 ? (
+                    <p className="text-xs text-slate-500 italic">No hay facturas pendientes.</p>
+                  ) : (
+                    selectedContactInvoices.map((inv) => (
+                      <div
+                        key={inv.id}
+                        className="p-2.5 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between text-xs"
+                      >
+                        <div>
+                          <strong className="text-white block font-mono">
+                            {inv.invoiceNumber || inv.id}
+                          </strong>
+                          <span className="text-[10px] text-slate-400">
+                            Vence: {inv.dueDate || 'Inmediato'}
+                          </span>
+                        </div>
+                        <div className="text-right font-mono">
+                          <span className="text-rose-400 font-bold block">
+                            ${Number(inv.saldoPendienteUSD !== undefined ? inv.saldoPendienteUSD : inv.totalUSD).toFixed(2)}
+                          </span>
+                          <span className="text-[10px] text-slate-500">
+                            {inv.paymentStatus}
+                          </span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Botón Pre-Conciliar Pago */}
+              <button
+                onClick={() => {
+                  if (onNavigateToFinance) {
+                    onNavigateToFinance();
+                  }
+                }}
+                className="w-full mt-2 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-950/40 transition flex items-center justify-center gap-2 cursor-pointer min-h-[44px]"
+              >
+                <DollarSign className="w-4 h-4" />
+                <span>Pre-Conciliar Pago en Finanzas</span>
+              </button>
+            </>
+          ) : (
+            <p className="text-xs text-slate-500 italic text-center py-6">
+              Seleccione un contacto para ver su expediente crediticio y facturas activas.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* MODAL 1: Vinculación QR (Sandbox & Local Safe) */}
+      {showQrModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 max-w-sm w-full shadow-2xl text-center space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <QrCode className="w-4 h-4 text-emerald-400" />
+                <span>Vincular WhatsApp por QR</span>
+              </h3>
+              <button
+                onClick={() => setShowQrModal(false)}
+                className="text-slate-400 hover:text-white transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300">
+              Abra WhatsApp en su teléfono &gt; Dispositivos vinculados &gt; Vincular un dispositivo.
+            </p>
+
+            <div className="bg-white p-4 rounded-2xl mx-auto w-52 h-52 flex items-center justify-center border-4 border-emerald-600 shadow-inner">
+              {isGeneratingQr ? (
+                <RefreshCw className="w-8 h-8 text-emerald-600 animate-spin" />
+              ) : qrDataUri ? (
+                <img src={qrDataUri} alt="Código QR WhatsApp" className="w-full h-full object-contain" />
+              ) : (
+                <QrCode className="w-24 h-24 text-slate-800" />
+              )}
+            </div>
+
+            <div className="space-y-2 pt-2">
+              <input
+                type="text"
+                placeholder="Número vinculado (+58...)"
+                value={pairingPhone}
+                onChange={(e) => setPairingPhone(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white font-mono text-center"
+              />
+              <button
+                onClick={handleConfirmPairing}
+                className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition cursor-pointer min-h-[44px]"
+              >
+                Confirmar Dispositivo Vinculado
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: Selector de Plantillas Inteligentes */}
+      {showTemplatesModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 max-w-xl w-full shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-purple-400" />
+                <span>Plantillas Oficiales de Cobranza y CRM</span>
+              </h3>
+              <button
+                onClick={() => setShowTemplatesModal(false)}
+                className="text-slate-400 hover:text-white transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300">
+              Seleccione una plantilla. Las variables se autocompletarán con los datos del contacto seleccionado.
+            </p>
+
+            <div className="space-y-2 max-h-72 overflow-y-auto">
+              {templates.map((tpl) => (
+                <div
+                  key={tpl.id}
+                  onClick={() => handleSelectTemplate(tpl)}
+                  className="p-3 bg-slate-950 hover:bg-slate-800/60 rounded-xl border border-slate-800 cursor-pointer transition space-y-1"
+                >
+                  <div className="flex items-center justify-between">
+                    <strong className="text-xs text-purple-300">{tpl.nombre}</strong>
+                    <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-slate-900 text-slate-400">
+                      {tpl.categoria}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 line-clamp-2">{tpl.textoPlantilla}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+```
+
+---
+
+### ARCHIVO 4 DE 4: `src/components/finance/ReconciliationTab.tsx`
+```tsx
+/**
+ * Componente: Pestaña de Conciliación de Pagos & Deducción de Deuda
+ * Puro Apure ERP - Módulo de Finanzas
+ * 
+ * Integra:
+ * 1. Bandeja de Pre-Conciliación Forense OCR (Anti-IA / Anti-Fraude).
+ * 2. Historial de Conciliaciones Contables y Cruces de Factura.
+ * 3. Modal Split-View para auditoría y aprobación atómica.
+ */
+
+import React, { useState, useEffect } from 'react';
+import { Receipt, Plus, CheckCheck, Sparkles, History, ShieldCheck } from 'lucide-react';
+import { PaymentReconciliation, DualEntity, BillingInvoice } from '../../types/finance';
+import { PagoReportadoOCR } from '../../types/ocrForensic';
+import { BandejaPreConciliacionOCR } from '../finanzas/BandejaPreConciliacionOCR';
+import { OcrForensicService } from '../../services/ocrForensicService';
+
+const LectorComprobanteOCRModal = React.lazy(() =>
+  import('../finanzas/LectorComprobanteOCRModal').then((m) => ({ default: m.LectorComprobanteOCRModal }))
+);
+
+interface ReconciliationTabProps {
+  reconciliations: PaymentReconciliation[];
+  recFiltroEstado: 'TODOS' | 'CONCILIADO' | 'PENDIENTE';
+  setRecFiltroEstado: (estado: 'TODOS' | 'CONCILIADO' | 'PENDIENTE') => void;
+  onOpenReconciliation: () => void;
+  entities?: DualEntity[];
+  invoices?: BillingInvoice[];
+  bcvRate?: number;
+}
+
+export const ReconciliationTab: React.FC<ReconciliationTabProps> = ({
+  reconciliations,
+  recFiltroEstado,
+  setRecFiltroEstado,
+  onOpenReconciliation,
+  entities = [],
+  invoices = [],
+  bcvRate = 1,
+}) => {
+  // Sub-vista activa: Pre-Conciliación OCR vs Historial Contable
+  const [subView, setSubView] = useState<'PRE_CONCILIACION' | 'HISTORIAL'>('PRE_CONCILIACION');
+  const [pendingOcrCount, setPendingOcrCount] = useState<number>(0);
+
+  // Estado del Modal de Lectura OCR Forense
+  const [isOCRModalOpen, setIsOCRModalOpen] = useState<boolean>(false);
+  const [selectedOCRRecord, setSelectedOCRRecord] = useState<PagoReportadoOCR | null>(null);
+
+  // Escuchar comprobantes pendientes en tiempo real para mostrar badge
+  useEffect(() => {
+    const unsub = OcrForensicService.subscribePendingReportedPayments((recs) => {
+      const pending = recs.filter((r) => r.estadoConciliacion === 'pendiente_revision');
+      setPendingOcrCount(pending.length);
+    });
+    return () => unsub();
+  }, []);
+
+  const handleOpenRecordInOCR = (record: PagoReportadoOCR) => {
+    setSelectedOCRRecord(record);
+    setIsOCRModalOpen(true);
+  };
+
+  const handleOpenNewOCRModal = () => {
+    setSelectedOCRRecord(null);
+    setIsOCRModalOpen(true);
+  };
+
+  const filteredList = reconciliations.filter(
+    (r) => recFiltroEstado === 'TODOS' || r.estado === recFiltroEstado
+  );
+
+  return (
+    <div className="space-y-4 animate-fadeIn">
+      {/* Cabecera Principal y Acciones Rápidas */}
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-4 bg-slate-900 border border-slate-800 rounded-3xl shadow-lg">
+        <div>
+          <h2 className="text-sm font-bold text-white flex items-center gap-2">
+            <Receipt className="w-4 h-4 text-purple-400" />
+            <span>Conciliación de Pagos, Deducción de Deuda &amp; OCR Forense</span>
+          </h2>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Cruce atómico de cobros contra facturas de lotes biológicos, retenciones SENIAT, WhatsApp y validación anti-fraude.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          <button
+            onClick={handleOpenNewOCRModal}
+            className="min-h-[44px] px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold transition flex items-center gap-1.5 shadow-lg shadow-emerald-950/40 cursor-pointer flex-1 sm:flex-none justify-center"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>+ Analizar OCR / Ctrl+V</span>
+          </button>
+
+          <button
+            onClick={onOpenReconciliation}
+            className="min-h-[44px] px-3.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold transition flex items-center gap-1.5 shadow-lg shadow-purple-950/40 cursor-pointer flex-1 sm:flex-none justify-center"
+          >
+            <Plus className="w-4 h-4" />
+            <span>+ Nueva Conciliación Manual</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Selector de Sub-Vistas (Bandeja Pre-Conciliación OCR vs Historial Contable) */}
+      <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
+        <button
+          onClick={() => setSubView('PRE_CONCILIACION')}
+          className={`min-h-[44px] px-4 py-2 rounded-2xl text-xs font-bold transition flex items-center gap-2 cursor-pointer ${
+            subView === 'PRE_CONCILIACION'
+              ? 'bg-purple-600 text-white shadow-md shadow-purple-950/40'
+              : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+        >
+          <ShieldCheck className="w-4 h-4" />
+          <span>Bandeja Pre-Conciliación Forense OCR</span>
+          {pendingOcrCount > 0 && (
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-amber-400 text-slate-950 animate-pulse">
+              {pendingOcrCount}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setSubView('HISTORIAL')}
+          className={`min-h-[44px] px-4 py-2 rounded-2xl text-xs font-bold transition flex items-center gap-2 cursor-pointer ${
+            subView === 'HISTORIAL'
+              ? 'bg-purple-600 text-white shadow-md shadow-purple-950/40'
+              : 'bg-slate-900 text-slate-400 hover:text-white hover:bg-slate-800'
+          }`}
+        >
+          <History className="w-4 h-4" />
+          <span>Historial de Conciliaciones Contables &amp; Cruces</span>
+          <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-800 text-slate-300">
+            {reconciliations.length}
+          </span>
+        </button>
+      </div>
+
+      {/* CONTENIDO CONDICIONAL: Bandeja OCR vs Historial */}
+      {subView === 'PRE_CONCILIACION' ? (
+        <BandejaPreConciliacionOCR
+          onSelectRecord={handleOpenRecordInOCR}
+          onOpenNewOCRModal={handleOpenNewOCRModal}
+          entities={entities}
+          bcvRate={bcvRate}
+        />
+      ) : (
+        <div className="space-y-4">
+          {/* Tarjetas de Resumen de Conciliación */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl">
+              <div className="text-xs text-slate-400 font-semibold uppercase">Total Conciliado (USD)</div>
+              <div className="text-xl font-bold font-mono text-purple-400 mt-1">
+                ${reconciliations.reduce((acc, r) => acc + (r.montoUSD || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+              </div>
+              <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                Bs. {reconciliations.reduce((acc, r) => acc + (r.montoVES || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl">
+              <div className="text-xs text-slate-400 font-semibold uppercase">Cobranza a Crédito</div>
+              <div className="text-xl font-bold font-mono text-blue-400 mt-1">
+                ${reconciliations.filter((r) => r.modalidad === 'CREDITO').reduce((acc, r) => acc + (r.montoUSD || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+              </div>
+              <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                {reconciliations.filter((r) => r.modalidad === 'CREDITO').length} cuotas conciliadas
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl">
+              <div className="text-xs text-slate-400 font-semibold uppercase">Cruce de Cuentas Dual</div>
+              <div className="text-xl font-bold font-mono text-cyan-400 mt-1">
+                ${reconciliations.filter((r) => r.tipoImpacto === 'CRUCE_CUENTAS').reduce((acc, r) => acc + (r.montoUSD || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+              </div>
+              <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                Compensaciones entre roles
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-900 border border-slate-800 rounded-2xl">
+              <div className="text-xs text-slate-400 font-semibold uppercase">Retenciones Fiscales SENIAT</div>
+              <div className="text-xl font-bold font-mono text-amber-400 mt-1">
+                ${reconciliations.filter((r) => r.tipoImpacto === 'RETENCION_FISCAL').reduce((acc, r) => acc + (r.montoUSD || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+              </div>
+              <div className="text-[11px] text-slate-500 font-mono mt-0.5">
+                Comprobantes fiscales recibidos
+              </div>
+            </div>
+          </div>
+
+          {/* Filtros de Tabla */}
+          <div className="flex items-center justify-between gap-3 p-3 bg-slate-900 border border-slate-800 rounded-2xl text-xs">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-400 font-medium">Filtrar por Estado:</span>
+              <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
+                {(['TODOS', 'CONCILIADO', 'PENDIENTE'] as const).map((st) => (
+                  <button
+                    key={st}
+                    onClick={() => setRecFiltroEstado(st)}
+                    className={`px-3 py-1 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                      recFiltroEstado === st
+                        ? 'bg-purple-600 text-white shadow-xs'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {st}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="text-slate-400 font-mono text-[11px]">
+              Mostrando {filteredList.length} de {reconciliations.length} registros
+            </div>
+          </div>
+
+          {/* Tabla de Conciliaciones */}
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-xl">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs text-slate-300">
+                <thead className="bg-slate-950/90 uppercase tracking-wider text-[11px] text-slate-400 border-b border-slate-800">
+                  <tr>
+                    <th className="py-3.5 px-4 font-semibold">Ref. Bancaria / Soporte</th>
+                    <th className="py-3.5 px-4 font-semibold">Fecha</th>
+                    <th className="py-3.5 px-4 font-semibold">Cliente / RIF</th>
+                    <th className="py-3.5 px-4 font-semibold">Modalidad &amp; Método</th>
+                    <th className="py-3.5 px-4 font-semibold">Factura / Lote Asignado</th>
+                    <th className="py-3.5 px-4 font-semibold text-right">Monto Recibido</th>
+                    <th className="py-3.5 px-4 font-semibold text-right">Monto USD ($)</th>
+                    <th className="py-3.5 px-4 font-semibold text-right">Monto Bs. (VES)</th>
+                    <th className="py-3.5 px-4 font-semibold text-center">Impacto</th>
+                    <th className="py-3.5 px-4 font-semibold text-center">Estado</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 font-mono">
+                  {filteredList.length === 0 ? (
+                    <tr>
+                      <td colSpan={10} className="py-12 text-center text-slate-500 font-sans italic">
+                        No hay conciliaciones de pago registradas con este criterio. Presione "+ Nueva Conciliación Manual" o analice un comprobante en la bandeja OCR.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredList.map((r) => (
+                      <tr key={r.id} className="hover:bg-slate-800/40 transition">
+                        <td className="py-3.5 px-4 font-bold text-white font-mono">
+                          <div>{r.numeroReferencia}</div>
+                          <div className="text-[10px] text-slate-400 font-sans">{r.bancoPlataforma || 'N/A'}</div>
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-400 font-sans">{r.fecha}</td>
+                        <td className="py-3.5 px-4 font-sans text-slate-200">
+                          <div>{r.clienteNombre}</div>
+                          <div className="text-[10px] text-slate-400 font-mono">{r.clienteRif}</div>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              r.modalidad === 'CREDITO'
+                                ? 'bg-blue-950 text-blue-300 border border-blue-800'
+                                : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                            }`}
+                          >
+                            {r.modalidad}
+                          </span>
+                          <div className="text-[10px] text-slate-400 mt-0.5 font-sans">{r.metodoPago}</div>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <span className="font-semibold text-amber-300">{r.facturaNumero || r.facturaId}</span>
+                          {r.loteId && (
+                            <div className="text-[10px] text-emerald-400 flex items-center gap-1 mt-0.5 font-sans">
+                              <span>Lote: {r.loteId}</span>
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-4 text-right font-bold text-slate-200">
+                          {r.monedaRecibida === 'USD' ? '$' : 'Bs. '}
+                          {r.montoRecibido.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className="py-3.5 px-4 text-right font-bold text-emerald-400">
+                          ${r.montoUSD.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className="py-3.5 px-4 text-right font-bold text-cyan-400">
+                          Bs. {r.montoVES.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className="py-3.5 px-4 text-center">
+                          <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold bg-slate-950 text-slate-300 border border-slate-700">
+                            {r.tipoImpacto}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4 text-center">
+                          <span
+                            className={`px-2.5 py-1 rounded-full text-[10px] font-bold flex items-center justify-center gap-1 mx-auto ${
+                              r.estado === 'CONCILIADO'
+                                ? 'bg-emerald-950 text-emerald-300 border border-emerald-700'
+                                : 'bg-amber-950 text-amber-300 border border-amber-700'
+                            }`}
+                          >
+                            <CheckCheck className="w-3 h-3 text-emerald-400" />
+                            <span>{r.estado}</span>
+                          </span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE LECTURA FORENSE OCR & PRE-CONCILIACIÓN */}
+      {isOCRModalOpen && (
+        <React.Suspense fallback={null}>
+          <LectorComprobanteOCRModal
+            isOpen={isOCRModalOpen}
+            onClose={() => {
+              setIsOCRModalOpen(false);
+              setSelectedOCRRecord(null);
+            }}
+            initialRecord={selectedOCRRecord}
+            entities={entities}
+            invoices={invoices}
+            bcvRate={bcvRate}
+          />
+        </React.Suspense>
+      )}
+    </div>
+  );
+};
+```
+```
+
+***
+
+Una vez que Google AI Studio confirme que escribió estos 4 componentes, avísame y te entrego la **Iteración 3 y Final (Integración en Páginas, Endpoints del Servidor y Reglas)**.

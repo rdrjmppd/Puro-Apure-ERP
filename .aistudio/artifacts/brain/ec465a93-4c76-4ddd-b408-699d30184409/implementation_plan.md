@@ -1,61 +1,84 @@
-# Plan de Implementación: Solución Definitiva para el Asistente de IA Fabi
+# Plan de Implementación: Resolución Definitiva de Desvinculación y Sincronización en Vivo de WhatsApp CRM
 
-Diagnóstico y resolución integral del error "Fallo de red temporal" en el asistente de IA Fabi, asegurando disponibilidad total tanto en entornos conectados con Gemini API como en modo fuera de línea (*Offline-First*) en operaciones de granja y entre diferentes navegadores o plataformas.
-
----
-
-## 1. Diagnóstico de Causa Raíz
-
-A través de la inspección del código fuente y pruebas directas sobre los endpoints de la aplicación (`/api/askGeminiAssistant`), se determinaron las siguientes causas raíz:
-
-1. **Atrapamiento Indiscriminado en el Cliente (`FloatingAIAssistant.tsx`)**:
-   - La función `handleSendMessage` ejecutaba `const res = await fetch('/api/askGeminiAssistant', ...)` seguido de `const data = await res.json()`.
-   - Si la petición recibía una respuesta no-JSON (por ejemplo, redirecciones HTTP 302 generadas por el balanceador o proxy de AI Studio al abrir en nuevos navegadores como `/__cookie_check.html`, o páginas de error 502/504 en HTML), `res.json()` arrojaba un error de sintaxis fatal (`SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON`).
-   - El bloque `catch (err)` capturaba esta excepción y emitía el mensaje rígido: *"Fallo de red temporal. Asegúrese de tener conectividad a internet"*, sin intentar ninguna alternativa de recuperación.
-
-2. **Aislamiento del Motor de Contingencia en el Backend**:
-   - El archivo `server/askGeminiAssistant.ts` cuenta con un motor heurístico de contingencia con conocimiento profundo del ERP (`generateLocalDomainFallback`).
-   - Sin embargo, dicho motor residía exclusivamente en el servidor Node.js. Si el usuario no tenía conexión directa al backend (por fallas de red, modo avión o desconexión en granja), el cliente no tenía acceso a esa inteligencia y colapsaba.
-
-3. **Carencia de Control de Tiempos de Espera (`AbortController`)**:
-   - El frontend no implementaba un límite de tiempo de espera controlado por el cliente. Si la API de Gemini o la red externa demoraban más de lo aceptable, la petición quedaba colgada hasta fallar abruptamente.
-
-4. **Restricciones de Red en Navegadores y Políticas de Cookies**:
-   - En navegadores secundarios o dispositivos móviles, la falta de configuración explícita de credenciales (`credentials: 'same-origin'`) y encabezados en la petición generaba bloqueos de sesión o preflight, impidiendo la entrega del payload JSON.
+Diagnóstico y plan integral para corregir el cierre intempestivo de la ventana de desvinculación (< 2 segundos) y habilitar la sincronización bidireccional reactiva de mensajes entrantes en la ventana lateral del CRM, asegurando la visualización inmediata de clientes y prospectos.
 
 ---
 
-## 2. Decisiones de Arquitectura Acordadas
+## 1. Diagnóstico Integral y Causas Raíces
 
-Con base en las respuestas del usuario:
-* **Conmutación Automática:** Fabi conmutará de forma inmediata y transparente al motor local offline de contingencia ante cualquier degradación o fallo de red.
-* **Tiempo Máximo de Espera:** 4 segundos para garantizar una interacción ágil sin bloqueos prolongados.
+### A. Causa Raíz del Cierre Prematuro del Modal de Desvinculación (< 2 segundos)
+En `src/components/crm/WhatsAppWebCloneView.tsx` (líneas 287-313):
+* El efecto de polling `fetchStatusAndQr` se activa automáticamente en cuanto `showQrModal` es verdadero.
+* Inmediatamente al montarse (y luego cada 3000 ms), invoca al endpoint `/api/whatsapp/status?lineaId=...`.
+* Dentro del bloque de éxito se encuentra la siguiente condición rígida:
+  ```typescript
+  if (res.estado === 'CONECTADO') {
+    setShowQrModal(false);
+  }
+  ```
+* **Mecanismo del fallo:** Cuando la línea ya se encuentra emparejada (`CONECTADO`) y el operador hace clic para consultar el número o pulsar **"Desvincular"**, el endpoint responde casi de forma instantánea indicando `estado: 'CONECTADO'`. El hook asume erróneamente que se acaba de escanear un código QR con éxito y fuerza `setShowQrModal(false)`. Esto destruye la ventana modal en menos de 1 o 2 segundos, haciendo imposible pulsar el botón de desvinculación.
+* **Resolución técnica:** El auto-cierre debe condicionarse **únicamente** a transiciones vivas de escaneo (`ESPERANDO_QR` $\rightarrow$ `CONECTADO`). Si el modal fue abierto por el usuario cuando la línea ya estaba conectada, el modal debe permanecer abierto de manera persistente hasta que el usuario decida cerrarlo manualmente o ejecute la acción de desvincular.
+
+---
+
+### B. Causa Raíz de la Ausencia de Mensajes Entrantes en la Ventana Lateral
+En `src/components/crm/WhatsAppWebCloneView.tsx` y `src/services/whatsappCloneService.ts`:
+1. **Directorio Lateral Desconectado de los Mensajes Reales:**
+   * La lista de la ventana lateral (`contactList`) se genera exclusivamente iterando sobre el arreglo estático `entities` del ERP (`for (const ent of entities)`).
+   * **Mecanismo del fallo:** Si un cliente o prospecto escribe al número de WhatsApp vinculado, pero dicho número aún no ha sido dado de alta como cliente o proveedor en el ERP, el contacto es **completamente invisible** en la barra lateral.
+2. **Ausencia de Previsualización de Mensajes y Marcas de Tiempo en la Lista:**
+   * Los elementos de la barra lateral no se suscriben a la actividad de los mensajes; no muestran el extracto del último mensaje recibido ("Hola, transferí...", etc.), la hora ni el contador de mensajes.
+3. **Filtro de Historial en la Inicialización del Socket Baileys:**
+   * En `server/whatsappQrBridge.ts`, el socket de Baileys se inicializa con `syncFullHistory: false`, omitiendo conversaciones previas existentes en el dispositivo físico.
+4. **Resolución técnica:** 
+   * Implementar un observador en tiempo real de conversaciones para la línea activa en Firestore (`whatsapp_mensajes`).
+   * Unificar de forma reactiva las entidades del ERP con **todos los números entrantes/salientes** que interactúen con la línea.
+   * Mostrar el último mensaje y ordenar cronológicamente las conversaciones en la barra lateral según la actividad más reciente.
+
+---
+
+## 2. Decisiones de Arquitectura Acordadas con el Usuario
+* **Directorio Unificado:** Mostrar en la ventana lateral tanto las entidades existentes del ERP como **todos los clientes que escriban**, permitiendo atender prospectos nuevos de inmediato.
+* **Alcance de Sincronización:** Habilitar sincronización de historial reciente al vincular y persistencia en tiempo real de mensajes entrantes y salientes.
 
 ---
 
 ## 3. Plan de Trabajo Detallado
 
-### Fase 1: Creación del Motor de Inteligencia Local Offline (`src/services/fabiOfflineEngine.ts`)
-* Extraer y enriquecer la matriz de pensamiento y conocimiento operativo de Fabi en un servicio cliente TypeScript puro sin dependencias externas:
-  - **Ciclo Avícola:** 35 a 40 días, sin deducción de merma, facturación a peso vivo * $4.00 USD/kg.
-  - **Ciclo Porcino:** 150 días (5 meses), deducción de merma de 15 a 20 kg, facturación a peso neto * $6.00 USD/kg, estándar de consumo de 4 sacos de alimento por cerdo ($40.00 USD/saco = $160.00 USD por cerdo).
-  - **Tasa Oficial BCV y Bimonetarismo:** Liquidación en USD y VES, tasa oficial, delta de devaluación Mark-to-Market para cuentas por cobrar/pagar.
-  - **Cruce Dual de Cuentas:** Compensación bidireccional entre cliente y proveedor a la tasa oficial.
-  - **Pedagogía por Rol y Pantalla:** Lenguaje paso a paso para Obreros de campo (pesajes en balanza, consumos) y respuestas ejecutivas para Administradores.
-  - **Gobernanza y Cláusula Canónica:** Respuesta fija ante consultas fuera de dominio y protección de contraseñas/secretos.
+### Fase 1: Blindaje del Modal de Estado y Desvinculación (`WhatsAppWebCloneView.tsx`)
+* En `WhatsAppWebCloneView.tsx`:
+  * Almacenar mediante una referencia (`wasWaitingQrOnOpenRef`) si el modal se abrió en modo emparejamiento (`ESPERANDO_QR` / `DESCONECTADO`).
+  * Modificar `fetchStatusAndQr` para que `setShowQrModal(false)` se dispare **únicamente** si `wasWaitingQrOnOpenRef.current === true` y el nuevo estado recibido es `CONECTADO`.
+  * Si el usuario abrió el modal estando ya conectado (para ver el estado o desvincular), garantizar que la ventana se mantenga abierta permanentemente.
+  * Añadir confirmación visual durante el proceso de desvinculación (`isDisconnecting`) con resguardo ante clics repetidos.
 
-### Fase 2: Blindaje y Resiliencia en el Cliente (`src/components/FloatingAIAssistant.tsx`)
-* Implementar `AbortController` con temporizador estricto de **4000 ms** (4 segundos).
-* Incorporar detección proactiva de conectividad (`navigator.onLine`). Si el usuario está offline, responder inmediatamente con el motor local sin esperar la llamada de red.
-* Configurar `fetch` con `credentials: 'same-origin'` y validación defensiva de cabeceras (`res.ok` y comprobación de `res.headers.get('content-type')?.includes('application/json')`).
-* Envolver la llamada en un mecanismo de salvaguarda: si `fetch` falla, aborta por timeout (4s) o devuelve datos no válidos, invocar inmediatamente `generateFabiLocalResponse(...)`, garantizando que el usuario **nunca** reciba un error bloqueante.
+### Fase 2: Motor Reactivo de Conversaciones para la Barra Lateral (`whatsappCloneService.ts` & `WhatsAppWebCloneView.tsx`)
+* **Servicio `whatsappCloneService.ts`:**
+  * Crear método `subscribeLineRecentConversations(lineaId, callback)` que escuche la colección `whatsapp_mensajes` para la línea activa y extraiga un mapa resumido por teléfono:
+    ```typescript
+    interface ConversationSummary {
+      telefonoE164: string;
+      ultimoMensajeTexto: string;
+      ultimoMensajeTimestamp: number;
+      ultimoMensajeDireccion: 'ENTRANTE' | 'SALIENTE';
+      hasComprobantePago: boolean;
+      unreadCount: number;
+    }
+    ```
+* **Componente `WhatsAppWebCloneView.tsx`:**
+  * Enriquecer `contactList`:
+    1. Mapear las entidades del ERP vinculando su saldo pendiente y estado crediticio.
+    2. Incorporar cualquier número telefónico que registre mensajes en Firestore y que no esté aún en `entities`, asignándole el rol `PROSPECTO_WHATSAPP`.
+    3. Asociar a cada tarjeta su último mensaje, fecha/hora formateada y etiqueta visual si contiene comprobante de pago.
+    4. Ordenar la lista lateral en orden descendente por `ultimoMensajeTimestamp`.
 
-### Fase 3: Optimización del Backend y Middleware (`server/askGeminiAssistant.ts` y `vite.config.ts`)
-* Reducir el timeout interno de la llamada a `@google/genai` en el servidor a 3500ms para responder antes del corte del cliente.
-* En `vite.config.ts`, añadir soporte explícito para preflight `OPTIONS` y manejo robusto de buffers en el middleware `/api/askGeminiAssistant`.
+### Fase 3: Optimización del Socket Baileys en Backend (`server/whatsappQrBridge.ts`)
+* Configurar la pasarela Baileys para procesar eventos de sincronización de chats y mensajes al completar la vinculación.
+* Asegurar que cada mensaje recibido (`messages.upsert`) normalice el teléfono a formato E.164 y guarde de inmediato en `whatsapp_mensajes` con atributos completos: `remitenteTelefono`, `destinatarioTelefono`, `texto`, `mediaUrl`, `timestamp`, `direccion`.
+* Si un mensaje entrante contiene una imagen, registrarlo simultáneamente en `pagos_reportados_ocr` para el flujo de pre-conciliación financiera sin alterar el libro mayor.
 
-### Fase 4: Verificación y Pruebas de Integración
-* Ejecutar compilación de producción (`npm run build`) y verificación de tipos (`npm run lint`).
-* Probar llamadas exitosas hacia Gemini API con conexión activa.
-* Simular desconexión de red y timeout superior a 4s para verificar la conmutación instantánea al motor local sin mensajes de error.
-* Probar en múltiples contextos de pantalla y roles (Obrero vs Administrador).
+### Fase 4: Certificación y Pruebas
+* **Prueba de Desvinculación:** Abrir el modal de una línea ya conectada y verificar que permanece abierto sin cerrarse. Ejecutar la desvinculación y comprobar el cambio de estado a `DESCONECTADO`.
+* **Prueba de Mensajes Entrantes:** Enviar un mensaje de prueba al número conectado y verificar que aparezca instantáneamente en la barra lateral con su texto y marca de tiempo.
+* **Prueba de Reanudación de Sesión:** Reiniciar el servidor de desarrollo y verificar que la sesión se restaure con credenciales cifradas sin requerir re-escaneo de QR.
+* **Compilación y Linters:** Ejecutar `npm run lint` y `npm run build` para validar ausencia de errores de tipos o advertencias de React.

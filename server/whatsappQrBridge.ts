@@ -22,6 +22,7 @@ import pino from 'pino';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import zlib from 'zlib';
 import { adminApp, adminAuth, adminDb, FieldValue } from './firebaseAdmin';
 
 export interface WhatsAppQrBridgeStatus {
@@ -59,15 +60,16 @@ const ENCRYPTION_SECRET =
 const ENCRYPTION_KEY = crypto.createHash('sha256').update(ENCRYPTION_SECRET).digest();
 
 function encryptSessionData(text: string): { iv: string; tag: string; encrypted: string } {
+  // Compresión gzip para mantener el payload compacto y dentro del límite estricto de 1MB de Firestore
+  const inputBuffer = zlib.gzipSync(Buffer.from(text, 'utf-8'));
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
-  let encrypted = cipher.update(text, 'utf8', 'hex');
-  encrypted += cipher.final('hex');
+  const encryptedBuf = Buffer.concat([cipher.update(inputBuffer), cipher.final()]);
   const tag = cipher.getAuthTag().toString('hex');
   return {
     iv: iv.toString('hex'),
     tag,
-    encrypted,
+    encrypted: encryptedBuf.toString('hex'),
   };
 }
 
@@ -76,9 +78,15 @@ function decryptSessionData(payload: { iv: string; tag: string; encrypted: strin
   const tag = Buffer.from(payload.tag, 'hex');
   const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
   decipher.setAuthTag(tag);
-  let decrypted = decipher.update(payload.encrypted, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
-  return decrypted;
+  const decryptedBuf = Buffer.concat([
+    decipher.update(Buffer.from(payload.encrypted, 'hex')),
+    decipher.final(),
+  ]);
+  // Detección automática de compresión gzip (magic bytes 0x1f 0x8b) para compatibilidad total
+  if (decryptedBuf.length >= 2 && decryptedBuf[0] === 0x1f && decryptedBuf[1] === 0x8b) {
+    return zlib.gunzipSync(decryptedBuf).toString('utf-8');
+  }
+  return decryptedBuf.toString('utf-8');
 }
 
 /**
@@ -135,16 +143,40 @@ async function persistSessionToFirestore(lineaId: string, sessionDir: string): P
     const fileNames = fs.readdirSync(sessionDir);
     if (fileNames.length === 0) return;
 
+    // Saneamiento DevSecOps: Seleccionar credenciales críticas y ventana deslizante de pre-keys
+    const prekeys = fileNames.filter((f) => f.startsWith('pre-key-'));
+    const lids = fileNames.filter((f) => f.startsWith('lid-mapping-'));
+    const essential = fileNames.filter((f) => !f.startsWith('lid-mapping-') && !f.startsWith('pre-key-'));
+
+    // Conservar esenciales (creds.json, app-state, etc.) + hasta 50 prekeys recientes y 50 lid-mappings
+    const selectedFiles = [
+      ...essential,
+      ...prekeys.slice(-50),
+      ...lids.slice(-50),
+    ];
+
     const files: Record<string, string> = {};
-    for (const name of fileNames) {
+    for (const name of selectedFiles) {
       const filePath = path.join(sessionDir, name);
-      if (fs.statSync(filePath).isFile()) {
+      if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
         files[name] = fs.readFileSync(filePath, 'utf-8');
       }
     }
 
     const jsonStr = JSON.stringify(files);
-    const encrypted = encryptSessionData(jsonStr);
+    let encrypted = encryptSessionData(jsonStr);
+
+    // Salvaguarda estricta de cuota Firestore: si aún supera 750 KB, limitar a credenciales esenciales
+    if (encrypted.encrypted.length > 750_000) {
+      const essentialFiles: Record<string, string> = {};
+      for (const name of essential) {
+        const filePath = path.join(sessionDir, name);
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          essentialFiles[name] = fs.readFileSync(filePath, 'utf-8');
+        }
+      }
+      encrypted = encryptSessionData(JSON.stringify(essentialFiles));
+    }
 
     await adminDb.collection('whatsapp_sesiones').doc(lineaId).set(
       {
@@ -155,6 +187,7 @@ async function persistSessionToFirestore(lineaId: string, sessionDir: string): P
       },
       { merge: true }
     );
+    console.log(`[WhatsApp Bridge] Sesión de ${lineaId} resguardada exitosamente en Firestore (${encrypted.encrypted.length} caracteres hex).`);
   } catch (err) {
     console.warn(`[WhatsApp Bridge] Aviso al resguardar sesión en Firestore para ${lineaId}:`, err);
   }
@@ -228,6 +261,7 @@ async function saveMessageToFirestore(messageData: {
   tipoMensaje: 'TEXTO' | 'IMAGEN';
   mediaUrl?: string;
   hasComprobantePago?: boolean;
+  senderName?: string;
 }) {
   try {
     const docRef = adminDb.collection('whatsapp_mensajes').doc(messageData.id);
@@ -438,7 +472,7 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
 
   // Escuchar mensajes entrantes en tiempo real con soporte @s.whatsapp.net y @lid
   sock.ev.on('messages.upsert', async ({ messages: newMessages, type }) => {
-    if (type !== 'notify') return;
+    if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of newMessages) {
       if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
@@ -506,6 +540,7 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
         tipoMensaje: isImage ? 'IMAGEN' : 'TEXTO',
         mediaUrl,
         hasComprobantePago: isImage,
+        senderName: msg.pushName || undefined,
       });
 
       // Si es imagen entrante, crear registro en bandeja de pre-conciliación OCR sin alterar libro mayor

@@ -1,6 +1,6 @@
 {
-  "summary": "Diagnóstico exhaustivo de causa raíz del error de comunicación en Fabi y plan de solución definitiva mediante motor de contingencia offline local (4s timeout), blindaje HTTP contra redirecciones cross-browser y resiliencia en granja.",
-  "updatedAt": "2026-10-14T02:03:14.970715719Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Plan de implementación y diagnóstico forense detallado para corregir el cierre prematuro del modal de desvinculación de WhatsApp y habilitar la sincronización reactiva en tiempo real de mensajes entrantes en la barra lateral del CRM.",
+  "updatedAt":  "2026-10-21T15:29:13.938760270Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }
