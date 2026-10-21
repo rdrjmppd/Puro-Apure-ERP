@@ -251,8 +251,26 @@ export class OcrForensicService {
   ): Promise<PagoReportadoOCR> {
     const startTime = Date.now();
 
-    // 1. Extraer bytes limpios de base64
-    const base64Clean = base64Data.replace(/^data:[a-zA-Z0-9/]+;base64,/, '');
+    // 1. Extraer bytes limpios de base64 (soportando Data URLs, Blobs y URLs relativas)
+    let base64Clean = base64Data;
+    if (base64Data.startsWith('data:')) {
+      base64Clean = base64Data.replace(/^data:[a-zA-Z0-9/]+;base64,/, '');
+    } else if (typeof window !== 'undefined' && (base64Data.startsWith('blob:') || base64Data.startsWith('http') || base64Data.startsWith('/'))) {
+      try {
+        const resp = await fetch(base64Data);
+        const blob = await resp.blob();
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+        base64Clean = dataUrl.replace(/^data:[a-zA-Z0-9/]+;base64,/, '');
+      } catch (err) {
+        console.warn('[OcrForensicService] Error leyendo URL de imagen a base64:', err);
+      }
+    }
+
     const binaryStr = atob(base64Clean);
     const bytes = new Uint8Array(binaryStr.length);
     for (let i = 0; i < binaryStr.length; i++) {
@@ -388,88 +406,113 @@ export class OcrForensicService {
     patronBancarioValido: boolean;
     analisisVisualDetalle: string;
   }> {
-    const apiKey =
-      (typeof process !== 'undefined' && (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY)) ||
-      'AQ.Ab8RN6IbKcoTjWc6NkNPO15jZ4YTyWTkmakH9uvI5jJ8RLLXLQ';
-
-    if (apiKey) {
+    // 1. Intentar vía endpoint proxy seguro del backend (/api/ocr-analyze)
+    if (typeof window !== 'undefined') {
       try {
-        const ai = new GoogleGenAI({ apiKey });
-        const prompt = `Actúa como un Perito Forense Documental y Lector OCR para Comprobantes de Pago en Venezuela (Pago Móvil, Transferencia, Zelle, Binance, Retención SENIAT o RIF).
-Analiza meticulosamente la imagen adjunta y extrae en formato estrictamente JSON:
-{
-  "tipoComprobante": "PAGO_MOVIL" | "TRANSFERENCIA" | "ZELLE" | "CRIPTOACTIVOS" | "RETENCION_FISCAL" | "RIF",
-  "bancoEmisor": "Nombre del banco emisor o plataforma",
-  "bancoReceptor": "Nombre del banco receptor",
-  "fechaComprobante": "YYYY-MM-DD",
-  "numeroReferencia": "Solo dígitos o alfanumérico de referencia",
-  "monedaOriginal": "VES" | "USD",
-  "montoOriginal": 0.00,
-  "rifCedula": "V-12345678 o J-12345678-0",
-  "telefonoNombreEmisor": "Teléfono o titular emisor",
-  "consistenciaTipografica": true o false (evalúa si los números del monto y referencia tienen la misma fuente, grosor y pixelado que el resto del texto),
-  "halosDeColor": true o false (detecta parches rectangulares, halos o artefactos de compresión alrededor de las cifras que indiquen edición en Photoshop o Canva),
-  "patronBancarioValido": true o false (confirma si la maquetación coincide con el comprobante real de Banesco, Mercantil, Provincial, BDV, BNC, Bancamiga, Zelle o Binance),
-  "analisisVisualDetalle": "Resumen conciso del peritaje forense"
-}`;
-
-        const response: any = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: mimeType || 'image/jpeg',
-                    data: base64Clean,
-                  },
-                },
-                { text: prompt },
-              ],
-            },
-          ],
-          config: {
-            temperature: 0.1,
-            responseMimeType: 'application/json',
-          },
+        const resp = await fetch('/api/ocr-analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ base64Clean, mimeType: mimeType || 'image/jpeg' }),
         });
-
-        const text = response.text || '';
-        const parsed = JSON.parse(text);
-        return {
-          tipoComprobante: parsed.tipoComprobante || 'PAGO_MOVIL',
-          bancoEmisor: parsed.bancoEmisor || 'Banco Emisor',
-          bancoReceptor: parsed.bancoReceptor || 'Banco Puro Apure',
-          fechaComprobante: parsed.fechaComprobante || new Date().toISOString().split('T')[0],
-          numeroReferencia: String(parsed.numeroReferencia || '').replace(/[^0-9A-Za-z]/g, ''),
-          monedaOriginal: parsed.monedaOriginal === 'USD' ? 'USD' : 'VES',
-          montoOriginal: Number(parsed.montoOriginal) || 0,
-          rifCedula: parsed.rifCedula,
-          telefonoNombreEmisor: parsed.telefonoNombreEmisor,
-          consistenciaTipografica: parsed.consistenciaTipografica ?? true,
-          halosDeColor: parsed.halosDeColor ?? false,
-          patronBancarioValido: parsed.patronBancarioValido ?? true,
-          analisisVisualDetalle: parsed.analisisVisualDetalle || 'Análisis visual Gemini completado.',
-        };
-      } catch (e) {
-        console.warn('[OcrForensicService] Error en Gemini Vision API, ejecutando extractor local:', e);
+        if (resp.ok) {
+          const resJson = await resp.json();
+          if (resJson.success && resJson.data) {
+            return resJson.data;
+          }
+        }
+      } catch (proxyErr) {
+        console.debug('[OcrForensicService] Proxy backend no disponible, intentando cliente directo:', proxyErr);
       }
     }
 
-    // Fallback local determinista si la API no está disponible o falla
+    // 2. Intentar vía SDK cliente directo si existe clave en el bundle o entorno
+    const apiKey =
+      (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GEMINI_API_KEY) ||
+      (typeof process !== 'undefined' && (process.env?.VITE_GEMINI_API_KEY || process.env?.GEMINI_API_KEY)) ||
+      '';
+
+    if (apiKey && !apiKey.startsWith('AQ.')) {
+      const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+      for (const model of candidateModels) {
+        try {
+          const ai = new GoogleGenAI({ apiKey });
+          const prompt = `Actúa como un Perito Forense Documental y Lector OCR para Comprobantes de Pago en Venezuela (Pago Móvil, Transferencia, Zelle, Binance, Criptoactivos).
+Analiza meticulosamente la imagen adjunta y extrae en formato estrictamente JSON:
+{
+  "tipoComprobante": "PAGO_MOVIL" | "TRANSFERENCIA" | "ZELLE" | "CRIPTOACTIVOS" | "RETENCION_FISCAL" | "RIF",
+  "bancoEmisor": "Nombre del banco emisor o plataforma (ej. Bancamiga, Banesco, Mercantil, BDV, BNC, Provincial, etc.)",
+  "bancoReceptor": "Nombre del banco receptor (ej. Banco de Venezuela, Banesco, etc.)",
+  "fechaComprobante": "YYYY-MM-DD",
+  "numeroReferencia": "Solo dígitos o alfanumérico de referencia (ej. 112338509503)",
+  "monedaOriginal": "VES" | "USD",
+  "montoOriginal": 0.00,
+  "rifCedula": "Cédula o RIF detectado (ej. V-11083828 o J-12345678-0)",
+  "telefonoNombreEmisor": "Teléfono o concepto asociado (ej. 04145057900)",
+  "consistenciaTipografica": true o false,
+  "halosDeColor": true o false,
+  "patronBancarioValido": true o false,
+  "analisisVisualDetalle": "Resumen conciso del peritaje forense"
+}
+IMPORTANTE: Si el monto está en formato venezolano con punto de miles y coma de decimales (ej. Bs. 8.833,96), conviértelo a número flotante 8833.96. Prohibido inventar datos si no son legibles.`;
+
+          const response: any = await ai.models.generateContent({
+            model,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: mimeType || 'image/jpeg',
+                      data: base64Clean,
+                    },
+                  },
+                  { text: prompt },
+                ],
+              },
+            ],
+            config: {
+              temperature: 0.1,
+              responseMimeType: 'application/json',
+            },
+          });
+
+          const text = response.text || '';
+          const parsed = JSON.parse(text);
+          return {
+            tipoComprobante: parsed.tipoComprobante || 'PAGO_MOVIL',
+            bancoEmisor: parsed.bancoEmisor || '',
+            bancoReceptor: parsed.bancoReceptor || '',
+            fechaComprobante: parsed.fechaComprobante || new Date().toISOString().split('T')[0],
+            numeroReferencia: String(parsed.numeroReferencia || '').replace(/[^0-9A-Za-z]/g, ''),
+            monedaOriginal: parsed.monedaOriginal === 'USD' ? 'USD' : 'VES',
+            montoOriginal: Number(parsed.montoOriginal) || 0,
+            rifCedula: parsed.rifCedula || '',
+            telefonoNombreEmisor: parsed.telefonoNombreEmisor || '',
+            consistenciaTipografica: parsed.consistenciaTipografica ?? true,
+            halosDeColor: parsed.halosDeColor ?? false,
+            patronBancarioValido: parsed.patronBancarioValido ?? true,
+            analisisVisualDetalle: parsed.analisisVisualDetalle || `Comprobante analizado con ${model}.`,
+          };
+        } catch (e) {
+          console.warn(`[OcrForensicService] Error con modelo ${model}:`, e);
+        }
+      }
+    }
+
+    // Fallback defensivo Cero Mock Data: Nunca inventar cifras ni bancos ficticios
     return {
       tipoComprobante: 'PAGO_MOVIL',
-      bancoEmisor: 'Banesco Banco Universal',
-      bancoReceptor: 'Banco de Venezuela',
+      bancoEmisor: '',
+      bancoReceptor: '',
       fechaComprobante: new Date().toISOString().split('T')[0],
-      numeroReferencia: `REF${Date.now().toString().slice(-8)}`,
+      numeroReferencia: '',
       monedaOriginal: 'VES',
-      montoOriginal: 1500.0,
+      montoOriginal: 0,
       consistenciaTipografica: true,
       halosDeColor: false,
       patronBancarioValido: true,
-      analisisVisualDetalle: 'Extracción de contingencia local completada. Verifique las cifras visualmente.',
+      analisisVisualDetalle: 'Extracción visual no concluyente o sin conexión a IA. Por favor verifique e introduzca los datos manualmente.',
     };
   }
 

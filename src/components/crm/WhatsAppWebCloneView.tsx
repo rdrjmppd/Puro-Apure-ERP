@@ -34,6 +34,8 @@ import {
   SlidersHorizontal,
   Bot,
   Zap,
+  UserPlus,
+  Trash2,
 } from 'lucide-react';
 import {
   WhatsAppLine,
@@ -43,7 +45,8 @@ import {
   WhatsAppLineType,
 } from '../../types/crmWhatsapp';
 import { WhatsAppCloneService, normalizeToE164 } from '../../services/whatsappCloneService';
-import { DualEntity, BillingInvoice } from '../../types/finance';
+import { DualEntity, BillingInvoice, DualEntityRole } from '../../types/finance';
+import { FinanceService } from '../../services/financeService';
 import { centsRound } from '../../services/financialAnalyticsService';
 
 interface WhatsAppWebCloneViewProps {
@@ -52,6 +55,7 @@ interface WhatsAppWebCloneViewProps {
   bcvRate: number;
   onAnalyzeReceiptOCR?: (imageDataUrl: string, contact?: WhatsAppChatContact) => void;
   onNavigateToFinance?: () => void;
+  onEntityCreated?: (entity: DualEntity) => void;
 }
 
 function formatChatTime(timestamp?: number): string {
@@ -76,6 +80,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
   bcvRate,
   onAnalyzeReceiptOCR,
   onNavigateToFinance,
+  onEntityCreated,
 }) => {
   // 1. Estado de Líneas y Conectividad
   const [lines, setLines] = useState<WhatsAppLine[]>([]);
@@ -102,6 +107,28 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
   const [isSending, setIsSending] = useState<boolean>(false);
   const [showTemplatesModal, setShowTemplatesModal] = useState<boolean>(false);
   const [templates, setTemplates] = useState<WhatsAppTemplate[]>([]);
+
+  // Estados para Registrar Lead y Eliminar Chat
+  const [showAddLeadModal, setShowAddLeadModal] = useState<boolean>(false);
+  const [showDeleteChatConfirm, setShowDeleteChatConfirm] = useState<boolean>(false);
+  const [isSavingLead, setIsSavingLead] = useState<boolean>(false);
+  const [isDeletingChat, setIsDeletingChat] = useState<boolean>(false);
+  const [leadModalError, setLeadModalError] = useState<string | null>(null);
+  const [newLeadForm, setNewLeadForm] = useState<{
+    name: string;
+    rifCedula: string;
+    role: DualEntityRole;
+    city: string;
+    address: string;
+    creditLimitUSD: number;
+  }>({
+    name: '',
+    rifCedula: '',
+    role: 'CLIENTE',
+    city: 'San Fernando de Apure',
+    address: 'Apure, Venezuela',
+    creditLimitUSD: 0,
+  });
 
   // 4. Modo Móvil (Pestañas en pantalla < 768px)
   const [mobileTab, setMobileTab] = useState<'CHATS' | 'CONVERSACION' | 'EXPEDIENTE'>('CHATS');
@@ -207,15 +234,22 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
       if (seenPhones.has(phone)) continue;
       seenPhones.add(phone);
 
-      const cleanDigits = phone.replace(/\D/g, '');
-      const isLidNumber = cleanDigits.length >= 14;
-      const cleanSender =
-        lastMsg.senderName && lastMsg.senderName !== phone && !lastMsg.senderName.startsWith('+')
-          ? lastMsg.senderName
-          : undefined;
+      // Buscar en todos los mensajes de este contacto si existe algún pushName o destinatarioNombre guardado
+      const allMsgsForPhone = lineMessages.filter((m) => {
+        const p1 = normalizeToE164(m.remitenteTelefono);
+        const p2 = normalizeToE164(m.destinatarioTelefono);
+        return p1 === phone || p2 === phone;
+      });
 
-      const displayName =
-        cleanSender || (isLidNumber ? `Contacto WhatsApp (*${cleanDigits.slice(-4)})` : phone);
+      const pushNameMsg = allMsgsForPhone.find(
+        (m) => m.senderName && m.senderName !== phone && !m.senderName.startsWith('+')
+      );
+      const destNameMsg = allMsgsForPhone.find(
+        (m) => (m as any).destinatarioNombre && (m as any).destinatarioNombre !== phone && !(m as any).destinatarioNombre.startsWith('+')
+      );
+
+      const cleanSender = pushNameMsg?.senderName || (destNameMsg as any)?.destinatarioNombre;
+      const displayName = cleanSender || `Prospecto (${phone})`;
 
       list.push({
         telefonoE164: phone,
@@ -333,7 +367,10 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
       activeLine.numeroTelefono || '',
       selectedContactPhone,
       text,
-      'TEXTO'
+      'TEXTO',
+      undefined,
+      undefined,
+      selectedContact?.nombreDisplay
     );
 
     setIsSending(false);
@@ -377,6 +414,78 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+  };
+
+  // Abrir modal para registrar Lead en CRM
+  const handleOpenAddLeadModal = () => {
+    if (!selectedContact) return;
+    const cleanName = selectedContact.nombreDisplay.replace(/\(\+?\d+\)/g, '').replace('Prospecto', '').trim();
+    setNewLeadForm({
+      name: cleanName || 'Nuevo Cliente',
+      rifCedula: '',
+      role: 'CLIENTE',
+      city: 'San Fernando de Apure',
+      address: 'Apure, Venezuela',
+      creditLimitUSD: 0,
+    });
+    setLeadModalError(null);
+    setShowAddLeadModal(true);
+  };
+
+  // Guardar Lead como Cliente oficial del ERP en Firestore
+  const handleSaveLeadAsClient = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newLeadForm.name.trim() || !newLeadForm.rifCedula.trim()) {
+      setLeadModalError('Nombre y RIF/Cédula son obligatorios');
+      return;
+    }
+    setIsSavingLead(true);
+    setLeadModalError(null);
+    try {
+      const newId = `ent_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const newEntity: DualEntity = {
+        id: newId,
+        name: newLeadForm.name.trim(),
+        nombre: newLeadForm.name.trim(),
+        razonSocial: newLeadForm.name.trim(),
+        rifCedula: newLeadForm.rifCedula.trim().toUpperCase(),
+        rif: newLeadForm.rifCedula.trim().toUpperCase(),
+        roles: [newLeadForm.role],
+        city: newLeadForm.city.trim() || 'San Fernando de Apure',
+        address: newLeadForm.address.trim() || 'Apure, Venezuela',
+        phone: selectedContactPhone,
+        telefonoContacto: selectedContactPhone,
+        balanceUSD: 0,
+        balanceVES: 0,
+        lastUpdatedTimestamp: Date.now(),
+      };
+
+      await FinanceService.saveDualEntity(newEntity, 'admin');
+      if (onEntityCreated) {
+        onEntityCreated(newEntity);
+      }
+      setShowAddLeadModal(false);
+    } catch (err: any) {
+      setLeadModalError(err.message || 'Error guardando cliente');
+    } finally {
+      setIsSavingLead(false);
+    }
+  };
+
+  // Eliminar chat e historial
+  const handleDeleteChat = async () => {
+    if (!selectedContactPhone || isDeletingChat) return;
+    setIsDeletingChat(true);
+    try {
+      await WhatsAppCloneService.deleteChat(activeLineId, selectedContactPhone);
+      setMessages([]);
+      setSelectedContactPhone('');
+      setShowDeleteChatConfirm(false);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error al eliminar chat');
+    } finally {
+      setIsDeletingChat(false);
+    }
   };
 
   // Polling automático del estado del QR auténtico mientras el modal está abierto
@@ -1001,6 +1110,35 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
 
           {selectedContact ? (
             <>
+              {/* Banner de Acción para Prospectos LEAD */}
+              {selectedContact.entityRole === 'LEAD' && (
+                <div className="p-3.5 bg-amber-950/40 border border-amber-500/40 rounded-2xl space-y-2.5">
+                  <div className="flex items-center gap-2 text-amber-300">
+                    <UserPlus className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span className="text-xs font-bold">Prospecto No Registrado</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Este número interactúa por WhatsApp pero no está registrado en la agenda del ERP.
+                  </p>
+                  <div className="pt-1 flex flex-col gap-2">
+                    <button
+                      onClick={handleOpenAddLeadModal}
+                      className="w-full py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-md transition flex items-center justify-center gap-1.5 cursor-pointer min-h-[44px]"
+                    >
+                      <UserPlus className="w-4 h-4" />
+                      <span>➕ Agregar a Agenda CRM</span>
+                    </button>
+                    <button
+                      onClick={() => setShowDeleteChatConfirm(true)}
+                      className="w-full py-2 px-3 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 font-bold text-xs transition flex items-center justify-center gap-1.5 cursor-pointer min-h-[44px]"
+                    >
+                      <Trash2 className="w-4 h-4 text-rose-400" />
+                      <span>🗑️ Eliminar Chat e Historial</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Tarjetas de Saldos y Límite de Crédito */}
               <div className="space-y-2">
                 <div className="p-3 bg-slate-950 rounded-2xl border border-slate-800">

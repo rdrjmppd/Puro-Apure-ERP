@@ -240,14 +240,33 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
       setMontoOriginal(result.montoOriginal);
       setTasaBcvSnapshot(result.tasaBcvSnapshot);
 
-      // Intentar vincular cliente sugerido si existe coincidencia de RIF o Cédula
-      if (result.rifCedula && entities.length > 0) {
-        const cleanRif = result.rifCedula.replace(/[^0-9A-Za-z]/g, '').toLowerCase();
-        const found = entities.find((e) =>
-          e.rifCedula.replace(/[^0-9A-Za-z]/g, '').toLowerCase().includes(cleanRif)
-        );
-        if (found) {
-          setSelectedEntityId(found.id);
+      // Intentar vincular cliente sugerido si existe coincidencia de RIF, Cédula o Teléfono
+      if (entities.length > 0) {
+        let matched: DualEntity | undefined;
+        if (result.rifCedula) {
+          const cleanRif = result.rifCedula.replace(/[^0-9A-Za-z]/g, '').toLowerCase();
+          matched = entities.find((e) =>
+            (e.rifCedula || '').replace(/[^0-9A-Za-z]/g, '').toLowerCase().includes(cleanRif)
+          );
+        }
+        if (!matched && result.telefonoNombreEmisor) {
+          const cleanPhone = result.telefonoNombreEmisor.replace(/\D/g, '');
+          if (cleanPhone.length >= 7) {
+            matched = entities.find((e) =>
+              (e.phone || '').replace(/\D/g, '').includes(cleanPhone) ||
+              (e.telefonoContacto || '').replace(/\D/g, '').includes(cleanPhone)
+            );
+          }
+        }
+        if (!matched && initialClientPhone) {
+          const cleanInit = initialClientPhone.replace(/\D/g, '');
+          matched = entities.find((e) =>
+            (e.phone || '').replace(/\D/g, '').includes(cleanInit) ||
+            (e.telefonoContacto || '').replace(/\D/g, '').includes(cleanInit)
+          );
+        }
+        if (matched) {
+          setSelectedEntityId(matched.id);
         }
       }
     } catch (err: any) {

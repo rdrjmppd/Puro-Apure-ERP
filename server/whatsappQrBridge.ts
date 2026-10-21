@@ -23,6 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import zlib from 'zlib';
+import { GoogleGenAI } from '@google/genai';
 import { adminApp, adminAuth, adminDb, FieldValue } from './firebaseAdmin';
 
 export interface WhatsAppQrBridgeStatus {
@@ -269,14 +270,16 @@ async function saveMessageToFirestore(messageData: {
   mediaUrl?: string;
   hasComprobantePago?: boolean;
   senderName?: string;
+  destinatarioNombre?: string;
+  whatsappMessageId?: string;
 }) {
   try {
     const docRef = adminDb.collection('whatsapp_mensajes').doc(messageData.id);
     await docRef.set({
       ...messageData,
-      whatsappMessageId: messageData.id,
+      whatsappMessageId: messageData.whatsappMessageId || messageData.id,
       ocrStatus: messageData.hasComprobantePago ? 'PENDIENTE' : 'NO_ANALIZADO',
-    });
+    }, { merge: true });
     console.log(`[WhatsApp Bridge] Mensaje ${messageData.id} guardado en Firestore.`);
   } catch (err) {
     console.warn(`[WhatsApp Bridge] No se pudo guardar mensaje en Firestore:`, err);
@@ -612,6 +615,16 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
     }
   });
 
+  // Propagar eliminación de chats desde el teléfono hacia Firestore
+  sock.ev.on('chats.delete' as any, async (deletedJids: string[]) => {
+    for (const jid of deletedJids) {
+      const cleanDigits = jid.replace('@s.whatsapp.net', '').replace('@lid', '').replace(/\D/g, '');
+      if (cleanDigits) {
+        await deleteWhatsAppChatHandler(lineaId, cleanDigits);
+      }
+    }
+  });
+
   return sock;
 }
 
@@ -692,7 +705,9 @@ export async function sendWhatsAppMessageHandler(
   lineaId: string,
   toPhone: string,
   text: string,
-  mediaDataUrl?: string
+  mediaDataUrl?: string,
+  clientMsgId?: string,
+  destinatarioNombre?: string
 ): Promise<{ success: boolean; messageId?: string; error?: string }> {
   const sock = activeSockets.get(lineaId);
   if (!sock) {
@@ -743,8 +758,9 @@ export async function sendWhatsAppMessageHandler(
     const myPhoneDigits = rawUser.split(':')[0].split('@')[0].replace(/[^\d]/g, '');
     const myPhone = myPhoneDigits ? `+${myPhoneDigits}` : '+580000000000';
 
+    const docId = clientMsgId || messageId;
     await saveMessageToFirestore({
-      id: messageId,
+      id: docId,
       lineaId,
       remitenteTelefono: myPhone,
       destinatarioTelefono: toPhone.startsWith('+') ? toPhone : `+${cleanDigits}`,
@@ -754,6 +770,8 @@ export async function sendWhatsAppMessageHandler(
       estado: 'ENVIADO',
       tipoMensaje: mediaDataUrl ? 'IMAGEN' : 'TEXTO',
       mediaUrl: mediaDataUrl,
+      whatsappMessageId: sentMsg?.key?.id,
+      destinatarioNombre: destinatarioNombre || undefined,
     });
 
     return { success: true, messageId };
@@ -803,6 +821,48 @@ export async function disconnectWhatsAppLineHandler(lineaId: string): Promise<{ 
     lastActivityTimestamp: Date.now(),
   });
 
+  // Purga automática DevSecOps: eliminar mensajes de Leads no registrados al desvincular
+  try {
+    const entitiesSnap = await adminDb.collection('dual_entities').get();
+    const registeredPhoneDigits = new Set<string>();
+    entitiesSnap.forEach((d) => {
+      const data = d.data();
+      const p1 = (data.phone || '').replace(/\D/g, '');
+      const p2 = (data.telefonoContacto || '').replace(/\D/g, '');
+      if (p1.length >= 7) registeredPhoneDigits.add(p1.slice(-10));
+      if (p2.length >= 7) registeredPhoneDigits.add(p2.slice(-10));
+    });
+
+    const messagesSnap = await adminDb
+      .collection('whatsapp_mensajes')
+      .where('lineaId', '==', lineaId)
+      .get();
+
+    const batch = adminDb.batch();
+    let purgedCount = 0;
+
+    messagesSnap.forEach((doc) => {
+      const msg = doc.data();
+      const remDigits = (msg.remitenteTelefono || '').replace(/\D/g, '').slice(-10);
+      const destDigits = (msg.destinatarioTelefono || '').replace(/\D/g, '').slice(-10);
+
+      const isRemRegistered = remDigits && registeredPhoneDigits.has(remDigits);
+      const isDestRegistered = destDigits && registeredPhoneDigits.has(destDigits);
+
+      if (!isRemRegistered && !isDestRegistered) {
+        batch.delete(doc.ref);
+        purgedCount++;
+      }
+    });
+
+    if (purgedCount > 0) {
+      await batch.commit();
+      console.log(`[WhatsApp Bridge] Purga DevSecOps: ${purgedCount} mensajes de Leads eliminados tras desvincular.`);
+    }
+  } catch (purgeErr) {
+    console.warn('[WhatsApp Bridge] Error durante purga automática de Leads:', purgeErr);
+  }
+
   await logWhatsAppAudit({
     lineaId,
     evento: 'LINEA_DESVINCULADA_MANUAL',
@@ -839,4 +899,167 @@ export async function verifyAuthToken(
   } catch (err: any) {
     return { authorized: false, error: `Token inválido: ${err.message}` };
   }
+}
+
+
+/**
+ * Elimina definitivamente un chat y todos sus mensajes en Firestore y en WhatsApp real
+ */
+export async function deleteWhatsAppChatHandler(
+  lineaId: string,
+  contactPhone: string
+): Promise<{ success: boolean; count?: number; error?: string }> {
+  try {
+    const cleanDigits = contactPhone.replace(/\D/g, '');
+    const normPhone = contactPhone.startsWith('+') ? contactPhone : `+${cleanDigits}`;
+
+    const messagesRef = adminDb.collection('whatsapp_mensajes');
+    const snap1 = await messagesRef
+      .where('lineaId', '==', lineaId)
+      .where('remitenteTelefono', '==', normPhone)
+      .get();
+    const snap2 = await messagesRef
+      .where('lineaId', '==', lineaId)
+      .where('destinatarioTelefono', '==', normPhone)
+      .get();
+
+    const docIds = new Set<string>();
+    snap1.docs.forEach((d) => docIds.add(d.id));
+    snap2.docs.forEach((d) => docIds.add(d.id));
+
+    if (cleanDigits.length >= 10) {
+      const snap3 = await messagesRef
+        .where('lineaId', '==', lineaId)
+        .where('remitenteTelefono', '==', `+58${cleanDigits.slice(-10)}`)
+        .get();
+      const snap4 = await messagesRef
+        .where('lineaId', '==', lineaId)
+        .where('destinatarioTelefono', '==', `+58${cleanDigits.slice(-10)}`)
+        .get();
+      snap3.docs.forEach((d) => docIds.add(d.id));
+      snap4.docs.forEach((d) => docIds.add(d.id));
+    }
+
+    const batch = adminDb.batch();
+    for (const id of docIds) {
+      batch.delete(messagesRef.doc(id));
+    }
+    if (docIds.size > 0) {
+      await batch.commit();
+      console.log(`[WhatsApp Bridge] Eliminados ${docIds.size} mensajes del chat ${normPhone}.`);
+    }
+
+    // Sincronizar borrado con el teléfono real de WhatsApp si el socket está activo
+    const sock = activeSockets.get(lineaId);
+    if (sock) {
+      try {
+        const jid = `${cleanDigits}@s.whatsapp.net`;
+        await sock.chatModify({ delete: true, lastMessages: [] }, jid);
+        console.log(`[WhatsApp Bridge] Sincronizado borrado de chat ${jid} con WhatsApp real.`);
+      } catch (sockErr) {
+        console.debug('[WhatsApp Bridge] No se pudo sincronizar borrado con socket Baileys:', sockErr);
+      }
+    }
+
+    await logWhatsAppAudit({
+      lineaId,
+      evento: 'CHAT_ELIMINADO',
+      destinatario: normPhone,
+      timestamp: Date.now(),
+      detalles: `Eliminado chat con ${normPhone}. Total mensajes purgados: ${docIds.size}`,
+    });
+
+    return { success: true, count: docIds.size };
+  } catch (err: any) {
+    console.error('[WhatsApp Bridge] Error al eliminar chat:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Analizador OCR de comprobantes bancarios mediante Gemini en el backend
+ */
+export async function analyzeReceiptOcrHandler(
+  base64Clean: string,
+  mimeType: string = 'image/jpeg'
+): Promise<{ success: boolean; data?: any; error?: string }> {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
+  if (!apiKey || apiKey.startsWith('AQ.')) {
+    return {
+      success: false,
+      error: 'API Key de Gemini no configurada en el servidor.',
+    };
+  }
+
+  const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  for (const model of candidateModels) {
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const prompt = `Actúa como un Perito Forense Documental y Lector OCR para Comprobantes de Pago en Venezuela (Pago Móvil, Transferencia, Zelle, Binance, Criptoactivos).
+Analiza meticulosamente la imagen adjunta y extrae en formato estrictamente JSON:
+{
+  "tipoComprobante": "PAGO_MOVIL" | "TRANSFERENCIA" | "ZELLE" | "CRIPTOACTIVOS" | "RETENCION_FISCAL" | "RIF",
+  "bancoEmisor": "Nombre del banco emisor o plataforma (ej. Bancamiga, Banesco, Mercantil, BDV, BNC, Provincial, etc.)",
+  "bancoReceptor": "Nombre del banco receptor (ej. Banco de Venezuela, Banesco, etc.)",
+  "fechaComprobante": "YYYY-MM-DD",
+  "numeroReferencia": "Solo dígitos o alfanumérico de referencia (ej. 112338509503)",
+  "monedaOriginal": "VES" | "USD",
+  "montoOriginal": 0.00,
+  "rifCedula": "Cédula o RIF detectado (ej. V-11083828 o J-12345678-0)",
+  "telefonoNombreEmisor": "Teléfono o concepto asociado (ej. 04145057900)",
+  "consistenciaTipografica": true o false,
+  "halosDeColor": true o false,
+  "patronBancarioValido": true o false,
+  "analisisVisualDetalle": "Resumen conciso del peritaje forense"
+}
+IMPORTANTE: Si el monto está en formato venezolano con punto de miles y coma de decimales (ej. Bs. 8.833,96), conviértelo a número flotante 8833.96. Prohibido inventar datos si no son legibles.`;
+
+      const response: any = await ai.models.generateContent({
+        model,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  mimeType: mimeType || 'image/jpeg',
+                  data: base64Clean,
+                },
+              },
+              { text: prompt },
+            ],
+          },
+        ],
+        config: {
+          temperature: 0.1,
+          responseMimeType: 'application/json',
+        },
+      });
+
+      const text = response.text || '';
+      const parsed = JSON.parse(text);
+      return {
+        success: true,
+        data: {
+          tipoComprobante: parsed.tipoComprobante || 'PAGO_MOVIL',
+          bancoEmisor: parsed.bancoEmisor || '',
+          bancoReceptor: parsed.bancoReceptor || '',
+          fechaComprobante: parsed.fechaComprobante || new Date().toISOString().split('T')[0],
+          numeroReferencia: String(parsed.numeroReferencia || '').replace(/[^0-9A-Za-z]/g, ''),
+          monedaOriginal: parsed.monedaOriginal === 'USD' ? 'USD' : 'VES',
+          montoOriginal: Number(parsed.montoOriginal) || 0,
+          rifCedula: parsed.rifCedula || '',
+          telefonoNombreEmisor: parsed.telefonoNombreEmisor || '',
+          consistenciaTipografica: parsed.consistenciaTipografica ?? true,
+          halosDeColor: parsed.halosDeColor ?? false,
+          patronBancarioValido: parsed.patronBancarioValido ?? true,
+          analisisVisualDetalle: parsed.analisisVisualDetalle || `Comprobante analizado con ${model}.`,
+        },
+      };
+    } catch (err) {
+      console.warn(`[OCR Backend] Error con modelo ${model}:`, err.message);
+    }
+  }
+
+  return { success: false, error: 'No se pudo procesar la imagen con los modelos disponibles.' };
 }

@@ -13,6 +13,8 @@ import {
   confirmPairingHandler,
   sendWhatsAppMessageHandler,
   disconnectWhatsAppLineHandler,
+  deleteWhatsAppChatHandler,
+  analyzeReceiptOcrHandler,
   verifyAuthToken,
 } from './server/whatsappQrBridge';
 
@@ -78,6 +80,73 @@ function bcvServerProxyPlugin(): Plugin {
             const authHeader = req.headers['authorization'] || '';
             const result = await createUserAccountHandler(parsed, authHeader);
             res.statusCode = result.success ? 200 : 403;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(result));
+          } catch (e: any) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ success: false, error: e.message }));
+          }
+        });
+      });
+
+      // Middleware para eliminar chats con sincronización bidireccional
+      server.middlewares.use('/api/whatsapp/delete-chat', async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        if (req.method !== 'POST') {
+          res.statusCode = 405;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: 'Method Not Allowed' }));
+          return;
+        }
+
+        const authHeader = req.headers['authorization'] || '';
+        const auth = await verifyAuthToken(authHeader);
+        if (!auth.authorized) {
+          res.statusCode = 401;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: auth.error }));
+          return;
+        }
+
+        let body = '';
+        req.on('data', (chunk: any) => (body += chunk));
+        req.on('end', async () => {
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            const result = await deleteWhatsAppChatHandler(
+              parsed.lineaId || 'linea_cobranzas',
+              parsed.contactPhone || ''
+            );
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify(result));
+          } catch (e: any) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ success: false, error: e.message }));
+          }
+        });
+      });
+
+      // Middleware proxy seguro para análisis OCR con Gemini 2.5 Flash
+      server.middlewares.use('/api/ocr-analyze', async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        if (req.method !== 'POST') {
+          res.statusCode = 405;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: 'Method Not Allowed' }));
+          return;
+        }
+
+        let body = '';
+        req.on('data', (chunk: any) => (body += chunk));
+        req.on('end', async () => {
+          try {
+            const parsed = body ? JSON.parse(body) : {};
+            const result = await analyzeReceiptOcrHandler(
+              parsed.base64Clean || '',
+              parsed.mimeType || 'image/jpeg'
+            );
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(result));
           } catch (e: any) {
@@ -259,7 +328,9 @@ function bcvServerProxyPlugin(): Plugin {
               parsed.lineaId || 'linea_cobranzas',
               parsed.toPhone || '',
               parsed.text || '',
-              parsed.mediaDataUrl
+              parsed.mediaDataUrl,
+              parsed.clientMsgId,
+              parsed.destinatarioNombre
             );
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(result));

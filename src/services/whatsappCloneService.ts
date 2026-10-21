@@ -15,6 +15,7 @@ import {
   orderBy,
   limit,
   onSnapshot,
+  writeBatch,
 } from 'firebase/firestore';
 import { db, auth } from '../firebase/config';
 import { offlineSyncEngine } from './offlineSyncEngine';
@@ -161,8 +162,9 @@ export class WhatsAppCloneService {
         linea_brm: 'Línea de Proveedores y BRM',
       };
 
-      const lines = snap.docs.map((d) => {
+      const lines: WhatsAppLine[] = snap.docs.map((d) => {
         const data = d.data() as WhatsAppLine;
+        const nombre = data.nombre || DEFAULT_LINE_NAMES[data.id || d.id] || `Línea ${data.id || d.id}`;
         if (data.numeroTelefono && data.numeroTelefono.includes('58414000000')) {
           return {
             ...data,
@@ -172,6 +174,10 @@ export class WhatsAppCloneService {
             isOnline: false,
           };
         }
+        return {
+          ...data,
+          nombre,
+        };
       });
       return lines;
     } catch {
@@ -193,8 +199,9 @@ export class WhatsAppCloneService {
     return onSnapshot(
       q,
       (snapshot) => {
-        const lines = snapshot.docs.map((d) => {
+        const lines: WhatsAppLine[] = snapshot.docs.map((d) => {
           const data = d.data() as WhatsAppLine;
+          const nombre = data.nombre || DEFAULT_LINE_NAMES[data.id || d.id] || `Línea ${data.id || d.id}`;
           if (data.numeroTelefono && data.numeroTelefono.includes('58414000000')) {
             return {
               ...data,
@@ -204,6 +211,10 @@ export class WhatsAppCloneService {
               isOnline: false,
             };
           }
+          return {
+            ...data,
+            nombre,
+          };
         });
         callback(lines);
       },
@@ -364,7 +375,24 @@ export class WhatsAppCloneService {
             normalizeToE164(m.destinatarioTelefono) === normPhone
         );
         chatMsgs.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-        callback(chatMsgs);
+
+        // Deduplicación estricta de mensajes salientes (ventana de 5s y mismo texto)
+        const deduped: WhatsAppMessage[] = [];
+        const seenIds = new Set<string>();
+        const seenContent = new Set<string>();
+
+        for (const m of chatMsgs) {
+          if (seenIds.has(m.id)) continue;
+          if (m.direccion === 'SALIENTE') {
+            const sig = `${m.destinatarioTelefono}_${(m.texto || '').trim()}_${Math.floor((m.timestamp || 0) / 5000)}`;
+            if (seenContent.has(sig)) continue;
+            seenContent.add(sig);
+          }
+          seenIds.add(m.id);
+          deduped.push(m);
+        }
+
+        callback(deduped);
       },
       (err) => {
         console.warn('[WhatsAppCloneService] Error suscribiendo mensajes de chat:', err);
@@ -382,14 +410,15 @@ export class WhatsAppCloneService {
     texto: string,
     tipoMensaje: WhatsAppMessage['tipoMensaje'] = 'TEXTO',
     mediaUrl?: string,
-    mediaMimeType?: string
+    mediaMimeType?: string,
+    destinatarioNombre?: string
   ): Promise<{ success: boolean; messageId: string; error?: string }> {
     const msgId = `WAM-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const now = Date.now();
     const destNorm = normalizeToE164(destinatarioTelefono);
     const remNorm = normalizeToE164(remitenteTelefono);
 
-    const message: WhatsAppMessage = {
+    const message: WhatsAppMessage & { destinatarioNombre?: string } = {
       id: msgId,
       whatsappMessageId: msgId,
       lineaId,
@@ -402,6 +431,7 @@ export class WhatsAppCloneService {
       tipoMensaje,
       hasComprobantePago: false,
       ocrStatus: 'NO_ANALIZADO',
+      destinatarioNombre: destinatarioNombre || undefined,
     };
 
     if (mediaUrl) {
@@ -432,6 +462,8 @@ export class WhatsAppCloneService {
             toPhone: destNorm,
             text: texto,
             mediaDataUrl: mediaUrl || undefined,
+            clientMsgId: msgId,
+            destinatarioNombre: destinatarioNombre || undefined,
           }),
         }).catch(() => {});
       }
@@ -610,6 +642,64 @@ export class WhatsAppCloneService {
     const cleanDigits = phone.replace(/[^\d]/g, '');
     const encoded = messageText ? encodeURIComponent(messageText) : '';
     return `https://wa.me/${cleanDigits}${encoded ? `?text=${encoded}` : ''}`;
+  }
+
+
+  /**
+   * Elimina una conversación y todos sus mensajes en Firestore y en el dispositivo real
+   */
+  static async deleteChat(
+    lineaId: string,
+    contactPhone: string
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      const normPhone = normalizeToE164(contactPhone);
+      const cleanDigits = contactPhone.replace(/\D/g, '');
+      const currentUser = auth.currentUser;
+      const token = currentUser ? await currentUser.getIdToken() : '';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      // 1. Notificar al backend para limpiar en Baileys y Firestore
+      if (typeof window !== 'undefined') {
+        fetch('/api/whatsapp/delete-chat', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ lineaId, contactPhone: normPhone }),
+        }).catch(() => {});
+      }
+
+      // 2. Limpieza reactiva en cliente
+      const q = query(
+        collection(db, MESSAGES_COLLECTION),
+        where('lineaId', '==', lineaId),
+        limit(500)
+      );
+      const snap = await getDocs(q);
+      const batch = writeBatch(db);
+      let count = 0;
+      snap.forEach((d) => {
+        const m = d.data() as WhatsAppMessage;
+        const rNorm = normalizeToE164(m.remitenteTelefono);
+        const dNorm = normalizeToE164(m.destinatarioTelefono);
+        if (
+          rNorm === normPhone ||
+          dNorm === normPhone ||
+          (cleanDigits.length >= 7 && (rNorm.includes(cleanDigits) || dNorm.includes(cleanDigits)))
+        ) {
+          batch.delete(d.ref);
+          count++;
+        }
+      });
+      if (count > 0) {
+        await batch.commit();
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      console.error('[WhatsAppCloneService] Error eliminando chat:', err);
+      return { success: false, error: err.message };
+    }
   }
 
   static generateDirectWhatsAppUrl(phone: string, messageText?: string): string {
