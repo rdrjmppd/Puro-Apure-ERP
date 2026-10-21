@@ -54,6 +54,22 @@ interface WhatsAppWebCloneViewProps {
   onNavigateToFinance?: () => void;
 }
 
+function formatChatTime(timestamp?: number): string {
+  if (!timestamp) return '';
+  const d = new Date(timestamp);
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  if (isToday) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) {
+    return 'Ayer';
+  }
+  return `${d.getDate()}/${d.getMonth() + 1}`;
+}
+
 export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
   entities,
   invoices,
@@ -70,6 +86,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [qrDataUri, setQrDataUri] = useState<string | null>(null);
   const [isHybridMode, setIsHybridMode] = useState<boolean>(false);
+  const wasWaitingQrOnOpenRef = useRef<boolean>(false);
 
   // 2. Estado de Directorio y Chats
   const [selectedContactPhone, setSelectedContactPhone] = useState<string>('');
@@ -78,7 +95,8 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     'TODOS' | 'CLIENTES' | 'PROVEEDORES' | 'DUAL' | 'CON_PAGO'
   >('TODOS');
 
-  // 3. Estado de Mensajes
+  // 3. Estado de Mensajes (Línea completa y Chat individual)
+  const [lineMessages, setLineMessages] = useState<WhatsAppMessage[]>([]);
   const [messages, setMessages] = useState<WhatsAppMessage[]>([]);
   const [messageInput, setMessageInput] = useState<string>('');
   const [isSending, setIsSending] = useState<boolean>(false);
@@ -105,20 +123,60 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     };
   }, []);
 
+  // Suscribir en tiempo real todos los mensajes de la línea activa para la ventana lateral
+  useEffect(() => {
+    if (!activeLineId) {
+      setLineMessages([]);
+      return;
+    }
+
+    const unsub = WhatsAppCloneService.subscribeLineMessages(activeLineId, (msgs) => {
+      setLineMessages(msgs);
+    });
+
+    return () => {
+      unsub();
+    };
+  }, [activeLineId]);
+
   // Línea actualmente activa
   const activeLine = useMemo(() => {
     return lines.find((l) => l.id === activeLineId) || lines[0] || null;
   }, [lines, activeLineId]);
 
-  // Construir Directorio de Contactos a partir de entidades y mensajes
+  // Construir Directorio de Contactos unificando entidades del ERP y todos los clientes que escriban
   const contactList = useMemo(() => {
     const list: WhatsAppChatContact[] = [];
+    const seenPhones = new Set<string>();
 
-    // Agregar contactos basados en entidades del ERP
+    // 1. Mapear últimos mensajes por teléfono normalizado
+    const lastMsgByPhone = new Map<string, WhatsAppMessage>();
+    const unreadCountByPhone = new Map<string, number>();
+
+    for (const msg of lineMessages) {
+      const otherPhone = msg.direccion === 'ENTRANTE' ? msg.remitenteTelefono : msg.destinatarioTelefono;
+      if (!otherPhone) continue;
+      const norm = normalizeToE164(otherPhone);
+      if (!norm) continue;
+
+      const existing = lastMsgByPhone.get(norm);
+      if (!existing || (msg.timestamp || 0) >= (existing.timestamp || 0)) {
+        lastMsgByPhone.set(norm, msg);
+      }
+
+      if (msg.direccion === 'ENTRANTE' && msg.estado !== 'LEIDO') {
+        unreadCountByPhone.set(norm, (unreadCountByPhone.get(norm) || 0) + 1);
+      }
+    }
+
+    // 2. Agregar contactos basados en entidades del ERP
     for (const ent of entities) {
       const rawPhone = ent.phone || ent.telefonoContacto;
       if (!rawPhone) continue;
       const normPhone = normalizeToE164(rawPhone);
+      if (!normPhone || seenPhones.has(normPhone)) continue;
+      seenPhones.add(normPhone);
+
       // Calcular facturas pendientes del cliente
       const clientInvoices = invoices.filter(
         (inv) => inv.customerId === ent.id && inv.paymentStatus !== 'PAGADO'
@@ -128,18 +186,60 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
         0
       );
 
-      list.push(
-        WhatsAppCloneService.enrichContactWithERP(
-          normPhone,
-          entities,
-          centsRound(pendingTotalUSD),
-          0
-        )
+      const contact = WhatsAppCloneService.enrichContactWithERP(
+        normPhone,
+        entities,
+        centsRound(pendingTotalUSD),
+        0
       );
+
+      const lastMsg = lastMsgByPhone.get(normPhone);
+      if (lastMsg) {
+        contact.ultimoMensaje = lastMsg;
+        contact.mensajesNoLeidos = unreadCountByPhone.get(normPhone) || 0;
+      }
+
+      list.push(contact);
     }
 
+    // 3. Agregar clientes y prospectos que hayan interactuado por WhatsApp y no estén en ERP
+    for (const [phone, lastMsg] of lastMsgByPhone.entries()) {
+      if (seenPhones.has(phone)) continue;
+      seenPhones.add(phone);
+
+      const cleanDigits = phone.replace(/\D/g, '');
+      const isLidNumber = cleanDigits.length >= 14;
+      const cleanSender =
+        lastMsg.senderName && lastMsg.senderName !== phone && !lastMsg.senderName.startsWith('+')
+          ? lastMsg.senderName
+          : undefined;
+
+      const displayName =
+        cleanSender || (isLidNumber ? `Contacto WhatsApp (*${cleanDigits.slice(-4)})` : phone);
+
+      list.push({
+        telefonoE164: phone,
+        nombreDisplay: displayName,
+        entityRole: 'LEAD',
+        estadoSolvencia: 'SOLVENTE',
+        deudaTotalUSD: 0,
+        mensajesNoLeidos: unreadCountByPhone.get(phone) || 0,
+        ultimoMensaje: lastMsg,
+      });
+    }
+
+    // 4. Ordenar las conversaciones: las que tienen mensaje más reciente arriba
+    list.sort((a, b) => {
+      const timeA = a.ultimoMensaje?.timestamp || 0;
+      const timeB = b.ultimoMensaje?.timestamp || 0;
+      if (timeA !== timeB) {
+        return timeB - timeA;
+      }
+      return a.nombreDisplay.localeCompare(b.nombreDisplay);
+    });
+
     return list;
-  }, [entities, invoices]);
+  }, [entities, invoices, lineMessages]);
 
   // Filtrado de contactos
   const filteredContacts = useMemo(() => {
@@ -151,7 +251,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
         if (!matchesName && !matchesPhone) return false;
       }
 
-      if (activeCategoryFilter === 'CLIENTES' && c.entityRole !== 'CLIENTE' && c.entityRole !== 'DUAL') {
+      if (activeCategoryFilter === 'CLIENTES' && c.entityRole !== 'CLIENTE' && c.entityRole !== 'DUAL' && c.entityRole !== 'LEAD') {
         return false;
       }
       if (activeCategoryFilter === 'PROVEEDORES' && c.entityRole !== 'PROVEEDOR' && c.entityRole !== 'DUAL') {
@@ -160,7 +260,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
       if (activeCategoryFilter === 'DUAL' && c.entityRole !== 'DUAL') {
         return false;
       }
-      if (activeCategoryFilter === 'CON_PAGO' && c.estadoSolvencia !== 'EN_MORA') {
+      if (activeCategoryFilter === 'CON_PAGO' && c.estadoSolvencia !== 'EN_MORA' && !c.ultimoMensaje?.hasComprobantePago) {
         return false;
       }
 
@@ -291,7 +391,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
           if (res.qrCodeDataUri) {
             setQrDataUri(res.qrCodeDataUri);
           }
-          if (res.estado === 'CONECTADO') {
+          // Solo auto-cerrar el modal SI el usuario estaba esperando el escaneo QR y se acaba de conectar
+          if (res.estado === 'CONECTADO' && wasWaitingQrOnOpenRef.current) {
+            wasWaitingQrOnOpenRef.current = false;
             setShowQrModal(false);
           }
         }
@@ -312,23 +414,29 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     };
   }, [showQrModal, activeLineId, activeLine?.qrCodeDataUri]);
 
-  // Abrir modal QR y solicitar generación a Baileys
+  // Abrir modal QR y solicitar generación a Baileys o gestión de línea conectada
   const handleOpenQrModal = async (forceNew: boolean = false) => {
-    setIsGeneratingQr(true);
+    const isCurrentlyConnected = activeLine?.estado === 'CONECTADO';
+    wasWaitingQrOnOpenRef.current = !isCurrentlyConnected || forceNew;
+
+    setIsGeneratingQr(!isCurrentlyConnected || forceNew);
     setShowQrModal(true);
     setErrorMessage(null);
     setQrDataUri(forceNew ? null : (activeLine?.qrCodeDataUri || null));
-    try {
-      const res = await WhatsAppCloneService.requestQrCode(activeLineId, forceNew);
-      if (res.success && (res.qrCodeDataUri || res.qrDataUri)) {
-        setQrDataUri(res.qrCodeDataUri || res.qrDataUri || null);
+
+    if (!isCurrentlyConnected || forceNew) {
+      try {
+        const res = await WhatsAppCloneService.requestQrCode(activeLineId, forceNew);
+        if (res.success && (res.qrCodeDataUri || res.qrDataUri)) {
+          setQrDataUri(res.qrCodeDataUri || res.qrDataUri || null);
+        }
+      } catch {
+        if (!forceNew && activeLine?.qrCodeDataUri) {
+          setQrDataUri(activeLine.qrCodeDataUri);
+        }
+      } finally {
+        setIsGeneratingQr(false);
       }
-    } catch {
-      if (!forceNew && activeLine?.qrCodeDataUri) {
-        setQrDataUri(activeLine.qrCodeDataUri);
-      }
-    } finally {
-      setIsGeneratingQr(false);
     }
   };
 
@@ -340,6 +448,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
       const res = await WhatsAppCloneService.disconnectLine(activeLineId);
       if (res.success) {
         setQrDataUri(null);
+        wasWaitingQrOnOpenRef.current = true;
         await handleOpenQrModal(true);
       } else {
         setErrorMessage(res.error || 'No se pudo desvincular la línea');
@@ -396,9 +505,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
         {/* Selector de Línea Operativa */}
         <div className="flex items-center gap-2">
           <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800">
-            {lines.map((l) => (
+            {lines.map((l, index) => (
               <button
-                key={l.id}
+                key={l.id ? `line-${l.id}` : `line-idx-${index}`}
                 onClick={() => setActiveLineId(l.id)}
                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 min-h-[38px] ${
                   activeLineId === l.id
@@ -416,14 +525,23 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
             ))}
           </div>
 
-          {/* Botón Escanear QR */}
+          {/* Botón Gestión / Vincular QR */}
           <button
             onClick={() => handleOpenQrModal(false)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition min-h-[44px] cursor-pointer"
-            title="Vincular o Reconectar sesión mediante Código QR"
+            title={activeLine?.estado === 'CONECTADO' ? 'Ver Estado y Opciones de Desvinculación' : 'Vincular o Reconectar sesión mediante Código QR'}
           >
-            <QrCode className="w-4 h-4 text-emerald-400" />
-            <span className="hidden sm:inline">Vincular QR</span>
+            {activeLine?.estado === 'CONECTADO' ? (
+              <>
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <span className="hidden sm:inline">Línea Conectada</span>
+              </>
+            ) : (
+              <>
+                <QrCode className="w-4 h-4 text-emerald-400" />
+                <span className="hidden sm:inline">Vincular QR</span>
+              </>
+            )}
           </button>
 
           {/* Conmutador Modo Híbrido wa.me */}
@@ -523,14 +641,15 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                 No hay contactos registrados que coincidan con la búsqueda.
               </div>
             ) : (
-              filteredContacts.map((contact) => {
+              filteredContacts.map((contact, index) => {
                 const isSelected = selectedContactPhone === contact.telefonoE164;
                 return (
                   <div
-                    key={contact.telefonoE164}
+                    key={contact.telefonoE164 ? `contact-${contact.telefonoE164}-${contact.entityId || index}` : `contact-idx-${index}`}
                     onClick={() => {
                       setSelectedContactPhone(contact.telefonoE164);
                       setMobileTab('CONVERSACION');
+                      setErrorMessage(null);
                     }}
                     className={`p-3 transition cursor-pointer flex items-start gap-3 min-h-[64px] ${
                       isSelected
@@ -543,6 +662,8 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                         <Building2 className="w-4 h-4 text-emerald-400" />
                       ) : contact.entityRole === 'DUAL' ? (
                         <Zap className="w-4 h-4 text-cyan-400" />
+                      ) : contact.entityRole === 'LEAD' ? (
+                        <MessageSquare className="w-4 h-4 text-amber-400" />
                       ) : (
                         <User className="w-4 h-4 text-purple-400" />
                       )}
@@ -553,27 +674,58 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                         <span className="font-semibold text-white text-xs truncate">
                           {contact.nombreDisplay}
                         </span>
-                        {contact.estadoSolvencia === 'EN_MORA' && (
-                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-800 shrink-0 font-bold">
-                            ${contact.deudaTotalUSD?.toFixed(0)}
-                          </span>
-                        )}
+                        <div className="flex items-center gap-1 shrink-0">
+                          {contact.ultimoMensaje && (
+                            <span className="text-[10px] font-mono text-slate-400">
+                              {formatChatTime(contact.ultimoMensaje.timestamp)}
+                            </span>
+                          )}
+                          {contact.estadoSolvencia === 'EN_MORA' && (
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-800 shrink-0 font-bold">
+                              ${contact.deudaTotalUSD?.toFixed(0)}
+                            </span>
+                          )}
+                        </div>
                       </div>
 
-                      <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
-                        <span className="font-mono text-[10px] truncate">{contact.telefonoE164}</span>
-                        <span
-                          className={`text-[9px] uppercase font-bold px-1.5 py-0.2 rounded ${
-                            contact.entityRole === 'DUAL'
-                              ? 'bg-cyan-950 text-cyan-300 border border-cyan-800'
-                              : contact.entityRole === 'PROVEEDOR'
-                              ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                              : 'bg-slate-800 text-slate-400'
-                          }`}
-                        >
-                          {contact.entityRole}
-                        </span>
-                      </div>
+                      {/* Vista previa del último mensaje en tiempo real */}
+                      {contact.ultimoMensaje ? (
+                        <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1 gap-1">
+                          <p className="truncate flex items-center gap-1 text-[11px] text-slate-300">
+                            {contact.ultimoMensaje.direccion === 'SALIENTE' && (
+                              <CheckCheck className="w-3.5 h-3.5 text-purple-400 shrink-0 inline" />
+                            )}
+                            {contact.ultimoMensaje.hasComprobantePago && (
+                              <Receipt className="w-3.5 h-3.5 text-emerald-400 shrink-0 inline" />
+                            )}
+                            <span className="truncate">
+                              {contact.ultimoMensaje.texto || (contact.ultimoMensaje.tipoMensaje === 'IMAGEN' ? '📷 Imagen / Comprobante' : '')}
+                            </span>
+                          </p>
+                          {contact.mensajesNoLeidos && contact.mensajesNoLeidos > 0 ? (
+                            <span className="px-1.5 py-0.2 rounded-full bg-emerald-500 text-slate-950 font-bold text-[9px] shrink-0">
+                              {contact.mensajesNoLeidos}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
+                          <span className="font-mono text-[10px] truncate">{contact.telefonoE164}</span>
+                          <span
+                            className={`text-[9px] uppercase font-bold px-1.5 py-0.2 rounded ${
+                              contact.entityRole === 'DUAL'
+                                ? 'bg-cyan-950 text-cyan-300 border border-cyan-800'
+                                : contact.entityRole === 'PROVEEDOR'
+                                ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                                : contact.entityRole === 'LEAD'
+                                ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                                : 'bg-slate-800 text-slate-400'
+                            }`}
+                          >
+                            {contact.entityRole}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
@@ -600,7 +752,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                     <h3 className="text-xs font-bold text-white flex items-center gap-2">
                       <span>{selectedContact.nombreDisplay}</span>
                       <span className="text-[10px] font-mono font-normal text-slate-400">
-                        {selectedContact.telefonoE164}
+                        {selectedContact.telefonoE164.replace(/\D/g, '').length >= 14
+                          ? `(WhatsApp ID *${selectedContact.telefonoE164.replace(/\D/g, '').slice(-4)})`
+                          : selectedContact.telefonoE164}
                       </span>
                     </h3>
                     <div className="flex items-center gap-2 text-[10px] text-slate-400">
@@ -662,11 +816,11 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                     </p>
                   </div>
                 ) : (
-                  messages.map((msg) => {
+                  messages.map((msg, index) => {
                     const isOutgoing = msg.direccion === 'SALIENTE';
                     return (
                       <div
-                        key={msg.id}
+                        key={msg.id ? `msg-${msg.id}` : `msg-${msg.timestamp || Date.now()}-${index}`}
                         className={`flex flex-col ${isOutgoing ? 'items-end' : 'items-start'}`}
                       >
                         <div
@@ -786,7 +940,10 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                   type="text"
                   placeholder="Escriba un mensaje (Presione Enter para enviar)..."
                   value={messageInput}
-                  onChange={(e) => setMessageInput(e.target.value)}
+                  onChange={(e) => {
+                    setMessageInput(e.target.value);
+                    if (errorMessage) setErrorMessage(null);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
@@ -899,9 +1056,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                   {selectedContactInvoices.length === 0 ? (
                     <p className="text-xs text-slate-500 italic">No hay facturas pendientes.</p>
                   ) : (
-                    selectedContactInvoices.map((inv) => (
+                    selectedContactInvoices.map((inv, index) => (
                       <div
-                        key={inv.id}
+                        key={inv.id ? `inv-${inv.id}` : `inv-idx-${index}`}
                         className="p-2.5 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between text-xs"
                       >
                         <div>
@@ -1086,9 +1243,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
             </p>
 
             <div className="space-y-2 max-h-72 overflow-y-auto">
-              {templates.map((tpl) => (
+              {templates.map((tpl, index) => (
                 <div
-                  key={tpl.id}
+                  key={tpl.id ? `tpl-${tpl.id}` : `tpl-idx-${index}`}
                   onClick={() => handleSelectTemplate(tpl)}
                   className="p-3 bg-slate-950 hover:bg-slate-800/60 rounded-xl border border-slate-800 cursor-pointer transition space-y-1"
                 >

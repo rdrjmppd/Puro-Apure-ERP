@@ -22,6 +22,7 @@ import pino from 'pino';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import zlib from 'zlib';
 import { adminApp, adminAuth, adminDb, FieldValue } from './firebaseAdmin';
 
 export interface WhatsAppQrBridgeStatus {
@@ -59,15 +60,16 @@ const ENCRYPTION_SECRET =
 const ENCRYPTION_KEY = crypto.createHash('sha256').update(ENCRYPTION_SECRET).digest();
 
 function encryptSessionData(text: string): { iv: string; tag: string; encrypted: string } {
+  // Compresión gzip para mantener el payload compacto y dentro del límite estricto de 1MB de Firestore
+  const inputBuffer = zlib.gzipSync(Buffer.from(text, 'utf-8'));
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
-  let encrypted = cipher.update(text, 'utf8', 'hex');
-  encrypted += cipher.final('hex');
+  const encryptedBuf = Buffer.concat([cipher.update(inputBuffer), cipher.final()]);
   const tag = cipher.getAuthTag().toString('hex');
   return {
     iv: iv.toString('hex'),
     tag,
-    encrypted,
+    encrypted: encryptedBuf.toString('hex'),
   };
 }
 
@@ -76,9 +78,15 @@ function decryptSessionData(payload: { iv: string; tag: string; encrypted: strin
   const tag = Buffer.from(payload.tag, 'hex');
   const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
   decipher.setAuthTag(tag);
-  let decrypted = decipher.update(payload.encrypted, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
-  return decrypted;
+  const decryptedBuf = Buffer.concat([
+    decipher.update(Buffer.from(payload.encrypted, 'hex')),
+    decipher.final(),
+  ]);
+  // Detección automática de compresión gzip (magic bytes 0x1f 0x8b) para compatibilidad total
+  if (decryptedBuf.length >= 2 && decryptedBuf[0] === 0x1f && decryptedBuf[1] === 0x8b) {
+    return zlib.gunzipSync(decryptedBuf).toString('utf-8');
+  }
+  return decryptedBuf.toString('utf-8');
 }
 
 /**
@@ -135,16 +143,40 @@ async function persistSessionToFirestore(lineaId: string, sessionDir: string): P
     const fileNames = fs.readdirSync(sessionDir);
     if (fileNames.length === 0) return;
 
+    // Saneamiento DevSecOps: Seleccionar credenciales críticas y ventana deslizante de pre-keys
+    const prekeys = fileNames.filter((f) => f.startsWith('pre-key-'));
+    const lids = fileNames.filter((f) => f.startsWith('lid-mapping-'));
+    const essential = fileNames.filter((f) => !f.startsWith('lid-mapping-') && !f.startsWith('pre-key-'));
+
+    // Conservar esenciales (creds.json, app-state, etc.) + hasta 50 prekeys recientes y 50 lid-mappings
+    const selectedFiles = [
+      ...essential,
+      ...prekeys.slice(-50),
+      ...lids.slice(-50),
+    ];
+
     const files: Record<string, string> = {};
-    for (const name of fileNames) {
+    for (const name of selectedFiles) {
       const filePath = path.join(sessionDir, name);
-      if (fs.statSync(filePath).isFile()) {
+      if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
         files[name] = fs.readFileSync(filePath, 'utf-8');
       }
     }
 
     const jsonStr = JSON.stringify(files);
-    const encrypted = encryptSessionData(jsonStr);
+    let encrypted = encryptSessionData(jsonStr);
+
+    // Salvaguarda estricta de cuota Firestore: si aún supera 750 KB, limitar a credenciales esenciales
+    if (encrypted.encrypted.length > 750_000) {
+      const essentialFiles: Record<string, string> = {};
+      for (const name of essential) {
+        const filePath = path.join(sessionDir, name);
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          essentialFiles[name] = fs.readFileSync(filePath, 'utf-8');
+        }
+      }
+      encrypted = encryptSessionData(JSON.stringify(essentialFiles));
+    }
 
     await adminDb.collection('whatsapp_sesiones').doc(lineaId).set(
       {
@@ -155,6 +187,7 @@ async function persistSessionToFirestore(lineaId: string, sessionDir: string): P
       },
       { merge: true }
     );
+    console.log(`[WhatsApp Bridge] Sesión de ${lineaId} resguardada exitosamente en Firestore (${encrypted.encrypted.length} caracteres hex).`);
   } catch (err) {
     console.warn(`[WhatsApp Bridge] Aviso al resguardar sesión en Firestore para ${lineaId}:`, err);
   }
@@ -235,6 +268,7 @@ async function saveMessageToFirestore(messageData: {
   tipoMensaje: 'TEXTO' | 'IMAGEN';
   mediaUrl?: string;
   hasComprobantePago?: boolean;
+  senderName?: string;
 }) {
   try {
     const docRef = adminDb.collection('whatsapp_mensajes').doc(messageData.id);
@@ -247,6 +281,53 @@ async function saveMessageToFirestore(messageData: {
   } catch (err) {
     console.warn(`[WhatsApp Bridge] No se pudo guardar mensaje en Firestore:`, err);
   }
+}
+
+/**
+ * Resuelve un JID o LID de WhatsApp a número telefónico real E.164 consultando la tabla inversa de Baileys
+ */
+function resolveLidToPhoneNumber(
+  lineaId: string,
+  remoteJid: string,
+  participant?: string
+): { phone: string; isLid: boolean; lidRaw?: string } {
+  const isLid = remoteJid.includes('@lid') || (!!participant && participant.includes('@lid'));
+  const sessionDir = getSessionDir(lineaId);
+
+  // 1. Si no es LID, extraer dígitos directos del JID estándar @s.whatsapp.net
+  if (!isLid) {
+    const raw = remoteJid.split('@')[0].split(':')[0].replace(/[^\d]/g, '');
+    return { phone: raw ? `+${raw}` : '', isLid: false };
+  }
+
+  // 2. Si es LID, extraer el ID numérico
+  const targetJid = remoteJid.includes('@lid') ? remoteJid : (participant || '');
+  const lidClean = targetJid.replace('@lid', '').split(':')[0].replace(/[^\d]/g, '');
+
+  if (lidClean) {
+    // Buscar en archivo reverso de Baileys generado en sesión
+    const reverseFile = path.join(sessionDir, `lid-mapping-${lidClean}_reverse.json`);
+    if (fs.existsSync(reverseFile)) {
+      try {
+        const mapped = JSON.parse(fs.readFileSync(reverseFile, 'utf-8'));
+        const cleanMapped = String(mapped).replace(/[^\d]/g, '');
+        if (cleanMapped) {
+          return { phone: `+${cleanMapped}`, isLid: true, lidRaw: lidClean };
+        }
+      } catch {}
+    }
+  }
+
+  // 3. Si participant tiene formato estándar @s.whatsapp.net, usarlo
+  if (participant && participant.includes('@s.whatsapp.net')) {
+    const partDigits = participant.replace('@s.whatsapp.net', '').split(':')[0].replace(/[^\d]/g, '');
+    if (partDigits) {
+      return { phone: `+${partDigits}`, isLid: false, lidRaw: lidClean };
+    }
+  }
+
+  // 4. Si aún no hay mapeo inverso, retornar el LID limpio
+  return { phone: lidClean ? `+${lidClean}` : '', isLid: true, lidRaw: lidClean };
 }
 
 /**
@@ -445,7 +526,7 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
 
   // Escuchar mensajes entrantes en tiempo real con soporte @s.whatsapp.net y @lid
   sock.ev.on('messages.upsert', async ({ messages: newMessages, type }) => {
-    if (type !== 'notify') return;
+    if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of newMessages) {
       if (!msg.message || msg.key.remoteJid === 'status@broadcast') continue;
@@ -453,13 +534,9 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
       const remoteJid = msg.key.remoteJid || '';
       const isFromMe = msg.key.fromMe || false;
 
-      // Normalización E.164: soporte JID estándar y LID
-      let phoneDigits = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '').replace(/[^\d]/g, '');
-      if (!phoneDigits && msg.key.participant) {
-        phoneDigits = msg.key.participant.replace('@s.whatsapp.net', '').replace('@lid', '').replace(/[^\d]/g, '');
-      }
-
-      const senderPhone = phoneDigits ? `+${phoneDigits}` : undefined;
+      // Normalización E.164 y resolución inversa de LIDs de WhatsApp
+      const resolved = resolveLidToPhoneNumber(lineaId, remoteJid, msg.key.participant);
+      const senderPhone = resolved.phone || undefined;
       const rawUser = sock.user?.id || '';
       const myPhoneDigits = rawUser.split(':')[0].split('@')[0].replace(/[^\d]/g, '');
       const myPhone = myPhoneDigits ? `+${myPhoneDigits}` : undefined;
@@ -513,6 +590,7 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
         tipoMensaje: isImage ? 'IMAGEN' : 'TEXTO',
         mediaUrl,
         hasComprobantePago: isImage,
+        senderName: msg.pushName || undefined,
       });
 
       // Si es imagen entrante, crear registro en bandeja de pre-conciliación OCR sin alterar libro mayor
@@ -623,7 +701,30 @@ export async function sendWhatsAppMessageHandler(
 
   try {
     const cleanDigits = toPhone.replace(/[^\d]/g, '');
-    const jid = `${cleanDigits}@s.whatsapp.net`;
+    const sessionDir = getSessionDir(lineaId);
+
+    // Detección de LID (identificador de 13+ dígitos sin prefijo nacional de Venezuela 58)
+    const isLid = cleanDigits.length > 13 && !cleanDigits.startsWith('58');
+    let jid = `${cleanDigits}@s.whatsapp.net`;
+
+    if (isLid) {
+      // Buscar si existe un mapeo inverso a número real para este LID
+      const reverseFile = path.join(sessionDir, `lid-mapping-${cleanDigits}_reverse.json`);
+      let mappedPhone = '';
+      if (fs.existsSync(reverseFile)) {
+        try {
+          const content = JSON.parse(fs.readFileSync(reverseFile, 'utf-8'));
+          mappedPhone = String(content).replace(/[^\d]/g, '');
+        } catch {}
+      }
+
+      if (mappedPhone) {
+        jid = `${mappedPhone}@s.whatsapp.net`;
+      } else {
+        // Enviar al identificador LID directamente
+        jid = `${cleanDigits}@lid`;
+      }
+    }
 
     let sentMsg;
     if (mediaDataUrl && mediaDataUrl.startsWith('data:image/')) {
@@ -646,7 +747,7 @@ export async function sendWhatsAppMessageHandler(
       id: messageId,
       lineaId,
       remitenteTelefono: myPhone,
-      destinatarioTelefono: `+${cleanDigits}`,
+      destinatarioTelefono: toPhone.startsWith('+') ? toPhone : `+${cleanDigits}`,
       direccion: 'SALIENTE',
       texto: text,
       timestamp: Date.now(),

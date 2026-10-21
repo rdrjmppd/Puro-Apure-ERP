@@ -343,7 +343,7 @@ service cloud.firestore {
     // ==========================================
     match /whatsapp_lineas/{lineaId} {
       allow read: if isSignedIn();
-      allow create, update: if isAdmin() && isValidId(lineaId);
+      allow create, update: if isSignedIn() && isValidId(lineaId);
       allow delete: if isSuperAdmin();
     }
 
@@ -355,7 +355,7 @@ service cloud.firestore {
 
     match /whatsapp_plantillas/{plantillaId} {
       allow read: if isSignedIn();
-      allow create, update: if isAdmin() && isValidId(plantillaId);
+      allow create, update: if isSignedIn() && isValidId(plantillaId);
       allow delete: if isSuperAdmin();
     }
 

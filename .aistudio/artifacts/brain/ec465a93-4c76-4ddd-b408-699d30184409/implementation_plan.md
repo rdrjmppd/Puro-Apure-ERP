@@ -1,61 +1,92 @@
-# Plan de Implementación: Solución Definitiva para el Asistente de IA Fabi
+# Informe de Auditoría y Plan de Remediación Técnica: WhatsApp CRM
 
-Diagnóstico y resolución integral del error "Fallo de red temporal" en el asistente de IA Fabi, asegurando disponibilidad total tanto en entornos conectados con Gemini API como en modo fuera de línea (*Offline-First*) en operaciones de granja y entre diferentes navegadores o plataformas.
-
----
-
-## 1. Diagnóstico de Causa Raíz
-
-A través de la inspección del código fuente y pruebas directas sobre los endpoints de la aplicación (`/api/askGeminiAssistant`), se determinaron las siguientes causas raíz:
-
-1. **Atrapamiento Indiscriminado en el Cliente (`FloatingAIAssistant.tsx`)**:
-   - La función `handleSendMessage` ejecutaba `const res = await fetch('/api/askGeminiAssistant', ...)` seguido de `const data = await res.json()`.
-   - Si la petición recibía una respuesta no-JSON (por ejemplo, redirecciones HTTP 302 generadas por el balanceador o proxy de AI Studio al abrir en nuevos navegadores como `/__cookie_check.html`, o páginas de error 502/504 en HTML), `res.json()` arrojaba un error de sintaxis fatal (`SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON`).
-   - El bloque `catch (err)` capturaba esta excepción y emitía el mensaje rígido: *"Fallo de red temporal. Asegúrese de tener conectividad a internet"*, sin intentar ninguna alternativa de recuperación.
-
-2. **Aislamiento del Motor de Contingencia en el Backend**:
-   - El archivo `server/askGeminiAssistant.ts` cuenta con un motor heurístico de contingencia con conocimiento profundo del ERP (`generateLocalDomainFallback`).
-   - Sin embargo, dicho motor residía exclusivamente en el servidor Node.js. Si el usuario no tenía conexión directa al backend (por fallas de red, modo avión o desconexión en granja), el cliente no tenía acceso a esa inteligencia y colapsaba.
-
-3. **Carencia de Control de Tiempos de Espera (`AbortController`)**:
-   - El frontend no implementaba un límite de tiempo de espera controlado por el cliente. Si la API de Gemini o la red externa demoraban más de lo aceptable, la petición quedaba colgada hasta fallar abruptamente.
-
-4. **Restricciones de Red en Navegadores y Políticas de Cookies**:
-   - En navegadores secundarios o dispositivos móviles, la falta de configuración explícita de credenciales (`credentials: 'same-origin'`) y encabezados en la petición generaba bloqueos de sesión o preflight, impidiendo la entrega del payload JSON.
+Auditoría forense de causas raíz y propuesta de solución técnica para la normalización de identificadores de cuenta (WhatsApp LIDs) y la resolución del fallo de escritura en Cloud Firestore al emitir mensajes salientes desde la plataforma.
 
 ---
 
-## 2. Decisiones de Arquitectura Acordadas
+## 1. Resumen Ejecutivo del Diagnóstico
 
-Con base en las respuestas del usuario:
-* **Conmutación Automática:** Fabi conmutará de forma inmediata y transparente al motor local offline de contingencia ante cualquier degradación o fallo de red.
-* **Tiempo Máximo de Espera:** 4 segundos para garantizar una interacción ágil sin bloqueos prolongados.
+A partir del análisis de la captura de pantalla (`image_9b447a05.png`) y la inspección de la arquitectura de comunicación entre Baileys y Cloud Firestore, se determinó que la recepción de mensajes opera satisfactoriamente a nivel de transporte de red, pero presenta dos fallas de integración y serialización en capa de datos:
+
+1. **Distorsión de Identidad (LIDs expuestos como números telefónicos):** Los remitentes mostrados como `+25404815458478` y `+83983891230953` no son números internacionales de Kenia o destinos foráneos, sino identificadores internos **WhatsApp LID (Linked Identity ID)** generados por la arquitectura multi-dispositivo de WhatsApp para proteger la privacidad del usuario. Al recibir el mensaje, el sistema extrajo únicamente la cadena numérica del LID y le antepuso un signo `+`, visualizándolo como un número telefónico inválido.
+2. **Colapso al Enviar Mensajes (`setDoc() with undefined value`):** Al enviar texto simple como "hola", la función constructora del mensaje deja `mediaUrl` y `mediaMimeType` con valor `undefined`. El SDK cliente de Cloud Firestore rechaza de forma estricta cualquier campo con valor `undefined`, abortando la operación antes de alcanzar la red.
 
 ---
 
-## 3. Plan de Trabajo Detallado
+## 2. Aislamiento Detallado de Causas Raíz
 
-### Fase 1: Creación del Motor de Inteligencia Local Offline (`src/services/fabiOfflineEngine.ts`)
-* Extraer y enriquecer la matriz de pensamiento y conocimiento operativo de Fabi en un servicio cliente TypeScript puro sin dependencias externas:
-  - **Ciclo Avícola:** 35 a 40 días, sin deducción de merma, facturación a peso vivo * $4.00 USD/kg.
-  - **Ciclo Porcino:** 150 días (5 meses), deducción de merma de 15 a 20 kg, facturación a peso neto * $6.00 USD/kg, estándar de consumo de 4 sacos de alimento por cerdo ($40.00 USD/saco = $160.00 USD por cerdo).
-  - **Tasa Oficial BCV y Bimonetarismo:** Liquidación en USD y VES, tasa oficial, delta de devaluación Mark-to-Market para cuentas por cobrar/pagar.
-  - **Cruce Dual de Cuentas:** Compensación bidireccional entre cliente y proveedor a la tasa oficial.
-  - **Pedagogía por Rol y Pantalla:** Lenguaje paso a paso para Obreros de campo (pesajes en balanza, consumos) y respuestas ejecutivas para Administradores.
-  - **Gobernanza y Cláusula Canónica:** Respuesta fija ante consultas fuera de dominio y protección de contraseñas/secretos.
+### Causa Raíz 1: Distorsión de Números Telefónicos por Identificadores LID
+* **Contexto de Baileys v6/v7:** En conexiones multi-dispositivo, WhatsApp no siempre transmite el número telefónico directo (`@s.whatsapp.net`), sino un identificador de dispositivo local (`@lid`), por ejemplo: `25404815458478@lid` o `83983891230953:1@lid`.
+* **Falla en `server/whatsappQrBridge.ts`:**
+  ```typescript
+  // Código actual que ocasiona el problema:
+  let phoneDigits = remoteJid.replace('@s.whatsapp.net', '').replace('@lid', '').replace(/[^\d]/g, '');
+  const senderPhone = phoneDigits ? `+${phoneDigits}` : undefined;
+  ```
+  Al remover `@lid` de `25404815458478@lid`, el código asume ciegamente que `25404815458478` son dígitos telefónicos y crea `+25404815458478`.
+* **Mecanismo de Resolución Omitido:** Baileys genera y almacena localmente en `.whatsapp_sessions/<lineaId>/` una serie de archivos de mapeo inverso (`lid-mapping-<lid>_reverse.json`) cuyo contenido es el número telefónico E.164 real del contacto (por ejemplo `"584245390630"`). Además, el mensaje entrante contiene el nombre público de perfil en `msg.pushName`. El servidor no estaba consultando este mapeo inverso antes de persistir el mensaje.
 
-### Fase 2: Blindaje y Resiliencia en el Cliente (`src/components/FloatingAIAssistant.tsx`)
-* Implementar `AbortController` con temporizador estricto de **4000 ms** (4 segundos).
-* Incorporar detección proactiva de conectividad (`navigator.onLine`). Si el usuario está offline, responder inmediatamente con el motor local sin esperar la llamada de red.
-* Configurar `fetch` con `credentials: 'same-origin'` y validación defensiva de cabeceras (`res.ok` y comprobación de `res.headers.get('content-type')?.includes('application/json')`).
-* Envolver la llamada en un mecanismo de salvaguarda: si `fetch` falla, aborta por timeout (4s) o devuelve datos no válidos, invocar inmediatamente `generateFabiLocalResponse(...)`, garantizando que el usuario **nunca** reciba un error bloqueante.
+---
 
-### Fase 3: Optimización del Backend y Middleware (`server/askGeminiAssistant.ts` y `vite.config.ts`)
-* Reducir el timeout interno de la llamada a `@google/genai` en el servidor a 3500ms para responder antes del corte del cliente.
-* En `vite.config.ts`, añadir soporte explícito para preflight `OPTIONS` y manejo robusto de buffers en el middleware `/api/askGeminiAssistant`.
+### Causa Raíz 2: Error Fatal al Enviar Mensajes (`Unsupported field value: undefined in mediaUrl`)
+* **Falla en `src/services/whatsappCloneService.ts` (`sendWhatsAppMessage`):**
+  ```typescript
+  const message: WhatsAppMessage = {
+    id: msgId,
+    whatsappMessageId: msgId,
+    lineaId,
+    remitenteTelefono: remNorm,
+    destinatarioTelefono: destNorm,
+    direccion: 'SALIENTE',
+    texto,
+    timestamp: now,
+    estado: 'ENVIADO',
+    tipoMensaje,
+    mediaUrl, // <-- undefined cuando el mensaje es solo texto
+    mediaMimeType, // <-- undefined cuando el mensaje es solo texto
+    hasComprobantePago: false,
+    ocrStatus: 'NO_ANALIZADO',
+  };
+  await setDoc(docRef, message); // <-- EXCEPCIÓN FATAL DE FIRESTORE
+  ```
+* **Contrato de Firestore Web SDK:** A diferencia del entorno Node.js Admin SDK (donde se puede activar `ignoreUndefinedProperties`), el SDK web cliente de Firestore prohíbe explícitamente valores `undefined` en documentos. Al detectar `mediaUrl: undefined`, Firestore bloquea la promesa y lanza:
+  `Function setDoc() called with invalid data. Unsupported field value: undefined (found in field mediaUrl in document whatsapp_mensajes/WAM-...)`.
 
-### Fase 4: Verificación y Pruebas de Integración
-* Ejecutar compilación de producción (`npm run build`) y verificación de tipos (`npm run lint`).
-* Probar llamadas exitosas hacia Gemini API con conexión activa.
-* Simular desconexión de red y timeout superior a 4s para verificar la conmutación instantánea al motor local sin mensajes de error.
-* Probar en múltiples contextos de pantalla y roles (Obrero vs Administrador).
+---
+
+## 3. Decisiones de Arquitectura Acordadas
+
+1. **Resolución de Identidad:** Mapeo automático de identificadores LID hacia su número telefónico E.164 real utilizando la base de datos de mapeo de Baileys, complementado con el nombre de perfil público (`pushName`) como titular principal en la interfaz.
+2. **Sanitización de Datos:** Limpieza defensiva en el cliente previa a la llamada de `setDoc()`, eliminando cualquier propiedad con valor `undefined` mediante un serializador estricto sin pérdida de metadatos.
+
+---
+
+## 4. Plan de Remediación Propuesto (Sin Ejecución de Código)
+
+### Fase 1: Motor de Resolución Inversa LID $\rightarrow$ E.164 (`server/whatsappQrBridge.ts`)
+* Implementar la función auxiliar `resolveLidToPhoneNumber(lineaId: string, remoteJid: string): string`:
+  1. Si el JID termina en `@s.whatsapp.net`, extraer directamente los dígitos del teléfono.
+  2. Si el JID termina en `@lid`, consultar la caché en memoria y el archivo `lid-mapping-<lid>_reverse.json` dentro del directorio de la sesión para obtener el número telefónico real.
+  3. Si no existe mapeo previo (contacto nuevo), registrar el JID limpio pero priorizar el `pushName` (nombre público de WhatsApp) como nombre principal del remitente.
+* Almacenar en el documento de Firestore tanto el número resuelto como el `pushName` y el `remoteJid` original para trazabilidad completa.
+
+### Fase 2: Sanitización DevSecOps en el Cliente (`src/services/whatsappCloneService.ts`)
+* Implementar la función de utilidad `sanitizeFirestorePayload<T>(data: T): Record<string, any>` que filtre y elimine recursivamente todas las propiedades con valor `undefined`:
+  ```typescript
+  const cleanMessage = Object.fromEntries(
+    Object.entries(message).filter(([_, value]) => value !== undefined)
+  );
+  await setDoc(docRef, cleanMessage);
+  ```
+* Garantizar que los campos opcionales como `mediaUrl` y `mediaMimeType` solo se adjunten al documento cuando realmente existan datos binarios o URLs válidas.
+
+### Fase 3: Enriquecimiento de la Interfaz Lateral (`WhatsAppWebCloneView.tsx`)
+* Ajustar la tarjeta del contacto en la barra lateral para que:
+  * Si el contacto tiene un `pushName` o nombre registrado en el ERP, lo muestre como título destacado.
+  * Debajo del nombre se muestre el número telefónico real (ej. `+58 424 5390630`) en tipografía monoespaciada legible, en lugar del código LID interno.
+  * La caja de error inferior se limpie automáticamente al reintentar el envío.
+
+### Fase 4: Protocolo de Verificación y Auditoría
+1. **Prueba de Envío de Texto:** Enviar un mensaje de prueba ("hola") desde la plataforma y confirmar que se entregue a la pasarela Baileys sin arrojar la excepción de `setDoc()`.
+2. **Prueba de Recepción con LID:** Enviar un mensaje desde un teléfono vinculado y comprobar que en la ventana lateral aparezca el nombre del contacto y su número telefónico real sin distorsión.
+3. **Pruebas Automatizadas:** Ejecutar `npm run lint` y la suite de pruebas unitarias para certificar la estabilidad de la aplicación.

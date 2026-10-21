@@ -1,6 +1,6 @@
 {
-  "summary": "Diagnóstico exhaustivo de causa raíz del error de comunicación en Fabi y plan de solución definitiva mediante motor de contingencia offline local (4s timeout), blindaje HTTP contra redirecciones cross-browser y resiliencia en granja.",
-  "updatedAt": "2026-10-14T02:03:14.970715719Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Informe de auditoría técnica y plan de remediación para resolver la distorsión de números telefónicos por identificadores LID de WhatsApp y el fallo de setDoc con campos undefined al enviar mensajes desde el CRM.",
+  "updatedAt":  "2026-10-21T15:51:57.077832127Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }

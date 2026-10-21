@@ -155,10 +155,14 @@ export class WhatsAppCloneService {
       }
 
       // Saneamiento DevSecOps: Si algún doc en Firestore tiene números ficticios heredados, sanearlos
+      const DEFAULT_LINE_NAMES: Record<string, string> = {
+        linea_cobranzas: 'Línea de Crédito y Cobranzas',
+        linea_ventas: 'Línea de Ventas y Despacho',
+        linea_brm: 'Línea de Proveedores y BRM',
+      };
+
       const lines = snap.docs.map((d) => {
         const data = d.data() as WhatsAppLine;
-        const nombre =
-          data.nombre || DEFAULT_LINE_NAMES[data.id || d.id] || `Línea ${data.id || d.id}`;
         if (data.numeroTelefono && data.numeroTelefono.includes('58414000000')) {
           return {
             ...data,
@@ -168,10 +172,6 @@ export class WhatsAppCloneService {
             isOnline: false,
           };
         }
-        return {
-          ...data,
-          nombre,
-        };
       });
       return lines;
     } catch {
@@ -183,14 +183,18 @@ export class WhatsAppCloneService {
    * Suscripción en tiempo real a las líneas activas
    */
   static subscribeWhatsAppLines(callback: (lines: WhatsAppLine[]) => void): () => void {
+    const DEFAULT_LINE_NAMES: Record<string, string> = {
+      linea_cobranzas: 'Línea de Crédito y Cobranzas',
+      linea_ventas: 'Línea de Ventas y Despacho',
+      linea_brm: 'Línea de Proveedores y BRM',
+    };
+
     const q = query(collection(db, LINES_COLLECTION));
     return onSnapshot(
       q,
       (snapshot) => {
         const lines = snapshot.docs.map((d) => {
           const data = d.data() as WhatsAppLine;
-          const nombre =
-            data.nombre || DEFAULT_LINE_NAMES[data.id || d.id] || `Línea ${data.id || d.id}`;
           if (data.numeroTelefono && data.numeroTelefono.includes('58414000000')) {
             return {
               ...data,
@@ -200,10 +204,6 @@ export class WhatsAppCloneService {
               isOnline: false,
             };
           }
-          return {
-            ...data,
-            nombre,
-          };
         });
         callback(lines);
       },
@@ -223,22 +223,18 @@ export class WhatsAppCloneService {
   ): Promise<boolean> {
     try {
       const ref = doc(db, LINES_COLLECTION, lineaId);
-      const nombreFallback = DEFAULT_LINE_NAMES[lineaId] || `Línea ${lineaId}`;
       await setDoc(
         ref,
         {
           id: lineaId,
-          nombre: nombreFallback,
-          estado,
-          qrCodeDataUri: qrDataUri || null,
           lastActivityTimestamp: Date.now(),
           isOnline: estado === 'CONECTADO',
         },
         { merge: true }
       );
       return true;
-    } catch (err) {
-      console.error('[WhatsAppCloneService] Error actualizando estado de línea:', err);
+    } catch (err: any) {
+      console.warn('[WhatsAppCloneService] Advertencia actualizando estado de línea:', err?.message || err);
       return false;
     }
   }
@@ -318,6 +314,32 @@ export class WhatsAppCloneService {
   }
 
   /**
+   * Suscripción en tiempo real a todos los mensajes de una línea para sincronización y vista previa en la barra lateral
+   */
+  static subscribeLineMessages(
+    lineaId: string,
+    callback: (messages: WhatsAppMessage[]) => void
+  ): () => void {
+    const q = query(
+      collection(db, MESSAGES_COLLECTION),
+      where('lineaId', '==', lineaId),
+      limit(500)
+    );
+
+    return onSnapshot(
+      q,
+      (snapshot) => {
+        const all = snapshot.docs.map((d) => d.data() as WhatsAppMessage);
+        all.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        callback(all);
+      },
+      (err) => {
+        console.warn('[WhatsAppCloneService] Error suscribiendo mensajes de línea:', err);
+      }
+    );
+  }
+
+  /**
    * Suscripción en tiempo real a los mensajes de una conversación específica
    */
   static subscribeChatMessages(
@@ -329,8 +351,7 @@ export class WhatsAppCloneService {
     const q = query(
       collection(db, MESSAGES_COLLECTION),
       where('lineaId', '==', lineaId),
-      orderBy('timestamp', 'asc'),
-      limit(200)
+      limit(300)
     );
 
     return onSnapshot(
@@ -339,9 +360,10 @@ export class WhatsAppCloneService {
         const all = snapshot.docs.map((d) => d.data() as WhatsAppMessage);
         const chatMsgs = all.filter(
           (m) =>
-            m.remitenteTelefono === normPhone ||
-            m.destinatarioTelefono === normPhone
+            normalizeToE164(m.remitenteTelefono) === normPhone ||
+            normalizeToE164(m.destinatarioTelefono) === normPhone
         );
+        chatMsgs.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         callback(chatMsgs);
       },
       (err) => {
@@ -378,11 +400,21 @@ export class WhatsAppCloneService {
       timestamp: now,
       estado: 'ENVIADO',
       tipoMensaje,
-      mediaUrl,
-      mediaMimeType,
       hasComprobantePago: false,
       ocrStatus: 'NO_ANALIZADO',
     };
+
+    if (mediaUrl) {
+      message.mediaUrl = mediaUrl;
+    }
+    if (mediaMimeType) {
+      message.mediaMimeType = mediaMimeType;
+    }
+
+    // Sanitización DevSecOps estricta: eliminar cualquier campo undefined antes de persistir en Firestore
+    const cleanMessage = Object.fromEntries(
+      Object.entries(message).filter(([_, v]) => v !== undefined)
+    ) as WhatsAppMessage;
 
     try {
       // Entrega a través de la pasarela de servidor con autorización
@@ -399,18 +431,18 @@ export class WhatsAppCloneService {
             lineaId,
             toPhone: destNorm,
             text: texto,
-            mediaDataUrl: mediaUrl,
+            mediaDataUrl: mediaUrl || undefined,
           }),
         }).catch(() => {});
       }
 
       const docRef = doc(db, MESSAGES_COLLECTION, msgId);
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        await offlineSyncEngine.enqueueMutation(MESSAGES_COLLECTION, msgId, 'SET', message, {
+        await offlineSyncEngine.enqueueMutation(MESSAGES_COLLECTION, msgId, 'SET', cleanMessage, {
           offline: true,
         });
       } else {
-        await setDoc(docRef, message);
+        await setDoc(docRef, cleanMessage);
       }
 
       setTimeout(() => {
@@ -452,14 +484,23 @@ export class WhatsAppCloneService {
       timestamp: now,
       estado: 'LEIDO',
       tipoMensaje: mediaUrl ? 'IMAGEN' : 'TEXTO',
-      mediaUrl,
-      mediaMimeType,
       hasComprobantePago: hasComprobante,
       ocrStatus: hasComprobante ? 'PENDIENTE' : 'NO_ANALIZADO',
     };
 
+    if (mediaUrl) {
+      message.mediaUrl = mediaUrl;
+    }
+    if (mediaMimeType) {
+      message.mediaMimeType = mediaMimeType;
+    }
+
+    const cleanMessage = Object.fromEntries(
+      Object.entries(message).filter(([_, v]) => v !== undefined)
+    ) as WhatsAppMessage;
+
     try {
-      await setDoc(doc(db, MESSAGES_COLLECTION, msgId), message);
+      await setDoc(doc(db, MESSAGES_COLLECTION, msgId), cleanMessage);
       return { success: true, messageId: msgId };
     } catch {
       return { success: false, messageId: msgId };
