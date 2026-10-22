@@ -326,6 +326,25 @@ export class WhatsAppCloneService {
   }
 
   /**
+   * Fuerza la desvinculación completa y solicita un código QR limpio y nuevo
+   */
+  static async forceResetQr(lineaId: string): Promise<{
+    success: boolean;
+    estado: WhatsAppLine['estado'];
+    qrCodeDataUri?: string;
+    qrDataUri?: string;
+    lastError?: string;
+  }> {
+    try {
+      await this.disconnectLine(lineaId);
+      return await this.requestQrCode(lineaId, true);
+    } catch (err: any) {
+      console.error('[WhatsAppCloneService] Error al forzar nuevo QR:', err);
+      return { success: false, estado: 'ERROR', lastError: err.message };
+    }
+  }
+
+  /**
    * Suscripción en tiempo real a todos los mensajes de una línea para sincronización y vista previa en la barra lateral
    */
   static subscribeLineMessages(

@@ -189,23 +189,50 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     const list: WhatsAppChatContact[] = [];
     const seenPhones = new Set<string>();
 
+    // Identificar todos los números telefónicos propios de la empresa/líneas para exclusión estricta
+    const ownPhones = new Set<string>();
+    if (activeLine?.numeroTelefono) {
+      const p = normalizeToE164(activeLine.numeroTelefono);
+      if (p) ownPhones.add(p);
+    }
+    for (const l of lines) {
+      if (l.numeroTelefono) {
+        const p = normalizeToE164(l.numeroTelefono);
+        if (p) ownPhones.add(p);
+      }
+    }
+    // Excluir números ficticios o de fallback del servidor
+    ownPhones.add('+584140000000');
+    ownPhones.add('+580000000000');
+
     // 1. Mapear últimos mensajes por teléfono normalizado
     const lastMsgByPhone = new Map<string, WhatsAppMessage>();
     const unreadCountByPhone = new Map<string, number>();
 
     for (const msg of lineMessages) {
-      const otherPhone = msg.direccion === 'ENTRANTE' ? msg.remitenteTelefono : msg.destinatarioTelefono;
-      if (!otherPhone) continue;
-      const norm = normalizeToE164(otherPhone);
-      if (!norm) continue;
+      const remNorm = normalizeToE164(msg.remitenteTelefono);
+      const destNorm = normalizeToE164(msg.destinatarioTelefono);
 
-      const existing = lastMsgByPhone.get(norm);
+      // Regla Canónica Inmutable:
+      // Si el mensaje es SALIENTE, la contraparte del chat es SIEMPRE destinatarioTelefono.
+      // Si el mensaje es ENTRANTE, la contraparte del chat es SIEMPRE remitenteTelefono.
+      let contactPhone = msg.direccion === 'SALIENTE' ? destNorm : remNorm;
+
+      // Si por alguna razón el teléfono asignado coincide con un teléfono propio de la empresa, usar el opuesto
+      if (ownPhones.has(contactPhone)) {
+        contactPhone = msg.direccion === 'SALIENTE' ? remNorm : destNorm;
+      }
+
+      // Si sigue siendo número propio o está vacío, descartar absolutamente de los hilos de clientes
+      if (!contactPhone || ownPhones.has(contactPhone)) continue;
+
+      const existing = lastMsgByPhone.get(contactPhone);
       if (!existing || (msg.timestamp || 0) >= (existing.timestamp || 0)) {
-        lastMsgByPhone.set(norm, msg);
+        lastMsgByPhone.set(contactPhone, msg);
       }
 
       if (msg.direccion === 'ENTRANTE' && msg.estado !== 'LEIDO') {
-        unreadCountByPhone.set(norm, (unreadCountByPhone.get(norm) || 0) + 1);
+        unreadCountByPhone.set(contactPhone, (unreadCountByPhone.get(contactPhone) || 0) + 1);
       }
     }
 
@@ -214,7 +241,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
       const rawPhone = ent.phone || ent.telefonoContacto;
       if (!rawPhone) continue;
       const normPhone = normalizeToE164(rawPhone);
-      if (!normPhone || seenPhones.has(normPhone)) continue;
+      if (!normPhone || ownPhones.has(normPhone) || seenPhones.has(normPhone)) continue;
       seenPhones.add(normPhone);
 
       // Calcular facturas pendientes del cliente
@@ -260,7 +287,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     };
 
     for (const [phone, lastMsg] of lastMsgByPhone.entries()) {
-      if (seenPhones.has(phone)) continue;
+      if (seenPhones.has(phone) || ownPhones.has(phone)) continue;
       // Descartar LIDs huérfanos o corruptos
       if (isCorruptedOrRawLid(phone)) continue;
       seenPhones.add(phone);
@@ -275,14 +302,19 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
       const syncedEntry = syncedContacts[phone] || syncedContacts[phone.replace(/\D/g, '')];
       const syncedName = isValidContactName(syncedEntry?.name) ? syncedEntry?.name : undefined;
 
-      const pushNameMsg = allMsgsForPhone.find(
-        (m) => isValidContactName(m.senderName)
+      // En mensajes entrantes buscar el senderName del cliente
+      const incomingMsg = allMsgsForPhone.find(
+        (m) => m.direccion === 'ENTRANTE' && isValidContactName(m.senderName)
       );
-      const destNameMsg = allMsgsForPhone.find(
-        (m) => isValidContactName((m as any).destinatarioNombre)
+      // En mensajes salientes buscar el destinatarioNombre del cliente
+      const outgoingMsg = allMsgsForPhone.find(
+        (m) => m.direccion === 'SALIENTE' && isValidContactName((m as any).destinatarioNombre)
+      );
+      const anyMsg = allMsgsForPhone.find(
+        (m) => isValidContactName((m as any).destinatarioNombre) || (m.direccion === 'ENTRANTE' && isValidContactName(m.senderName))
       );
 
-      const cleanSender = syncedName || pushNameMsg?.senderName || (destNameMsg as any)?.destinatarioNombre;
+      const cleanSender = syncedName || incomingMsg?.senderName || outgoingMsg?.destinatarioNombre || (anyMsg as any)?.destinatarioNombre || anyMsg?.senderName;
       const displayName = cleanSender || `Prospecto (${phone})`;
 
       list.push({
@@ -307,7 +339,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     });
 
     return list;
-  }, [entities, invoices, lineMessages, syncedContacts]);
+  }, [entities, invoices, lineMessages, syncedContacts, lines, activeLine]);
 
   // Filtrado de contactos
   const filteredContacts = useMemo(() => {
@@ -389,8 +421,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
 
     if (!activeLine || activeLine.estado !== 'CONECTADO') {
       setErrorMessage(
-        'La línea de WhatsApp no está conectada. Por favor escanee el código QR para vincular su cuenta.'
+        `La línea ${activeLine?.nombre || activeLineId} no está conectada activamente a WhatsApp (Estado: ${activeLine?.estado || 'DESCONECTADO'}). Escanee el código QR para vincular su cuenta.`
       );
+      handleOpenQrModal(false);
       return;
     }
 
@@ -425,8 +458,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
 
     if (!activeLine || activeLine.estado !== 'CONECTADO') {
       setErrorMessage(
-        'La línea de WhatsApp no está conectada. Por favor escanee el código QR para vincular su cuenta.'
+        `La línea ${activeLine?.nombre || activeLineId} no está conectada activamente a WhatsApp (Estado: ${activeLine?.estado || 'DESCONECTADO'}). Escanee el código QR para vincular su cuenta.`
       );
+      handleOpenQrModal(false);
       return;
     }
 
@@ -599,6 +633,28 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     } catch (err: any) {
       setErrorMessage(err.message || 'Error al desvincular');
     } finally {
+      setIsDisconnecting(false);
+    }
+  };
+
+  // Forzar reseteo completo de sesión Baileys y solicitar QR limpio
+  const handleForceResetQr = async () => {
+    setIsGeneratingQr(true);
+    setIsDisconnecting(true);
+    setErrorMessage(null);
+    setQrDataUri(null);
+    wasWaitingQrOnOpenRef.current = true;
+    try {
+      const res = await WhatsAppCloneService.forceResetQr(activeLineId);
+      if (res.success && (res.qrDataUri || res.qrCodeDataUri)) {
+        setQrDataUri(res.qrDataUri || res.qrCodeDataUri || null);
+      } else if (res.lastError) {
+        setErrorMessage(res.lastError);
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error al forzar reseteo de QR');
+    } finally {
+      setIsGeneratingQr(false);
       setIsDisconnecting(false);
     }
   };
@@ -1313,20 +1369,34 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                   </div>
                 )}
 
-                <button
-                  onClick={handleDisconnectLine}
-                  disabled={isDisconnecting}
-                  className="w-full py-2.5 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-bold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  {isDisconnecting ? (
-                    <>
-                      <RefreshCw className="w-4 h-4 animate-spin text-rose-400" />
-                      <span>Desvinculando y cerrando sesión...</span>
-                    </>
-                  ) : (
-                    <span>Desvincular y Cerrar Sesión</span>
-                  )}
-                </button>
+                <div className="space-y-2 pt-1">
+                  <button
+                    onClick={handleDisconnectLine}
+                    disabled={isDisconnecting || isGeneratingQr}
+                    className="w-full py-2.5 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-bold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    {isDisconnecting ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin text-rose-400" />
+                        <span>Desvinculando y cerrando sesión...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                        <span>Desvincular y Cerrar Sesión</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={handleForceResetQr}
+                    disabled={isGeneratingQr || isDisconnecting}
+                    className="w-full py-2 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 text-xs font-semibold transition cursor-pointer min-h-[40px] flex items-center justify-center gap-2 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 text-purple-400 ${isGeneratingQr ? 'animate-spin' : ''}`} />
+                    <span>🔄 Forzar Nuevo QR / Re-vincular</span>
+                  </button>
+                </div>
               </div>
             ) : (
               <>
@@ -1343,7 +1413,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                     </p>
                     <button
                       onClick={() => handleOpenQrModal(true)}
-                      disabled={isGeneratingQr}
+                      disabled={isGeneratingQr || isDisconnecting}
                       className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30 disabled:opacity-50"
                     >
                       <RefreshCw className={`w-4 h-4 text-white ${isGeneratingQr ? 'animate-spin' : ''}`} />
@@ -1380,11 +1450,31 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                 <div className="space-y-2 pt-1">
                   <button
                     onClick={() => handleOpenQrModal(true)}
-                    disabled={isGeneratingQr}
-                    className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 disabled:opacity-50"
+                    disabled={isGeneratingQr || isDisconnecting}
+                    className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30 disabled:opacity-50"
                   >
-                    <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isGeneratingQr ? 'animate-spin' : ''}`} />
+                    <RefreshCw className={`w-3.5 h-3.5 text-white ${isGeneratingQr ? 'animate-spin' : ''}`} />
                     <span>Refrescar Código QR</span>
+                  </button>
+
+                  <button
+                    onClick={handleForceResetQr}
+                    disabled={isGeneratingQr || isDisconnecting}
+                    className="w-full py-2.5 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/40 text-xs font-bold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 disabled:opacity-50"
+                    title="Limpia la sesión Baileys en disco y genera un nuevo handshake QR desde cero"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 text-purple-400 ${isDisconnecting ? 'animate-spin' : ''}`} />
+                    <span>🔄 Forzar Nuevo QR / Desvincular Sesión Zombie</span>
+                  </button>
+
+                  <button
+                    onClick={handleDisconnectLine}
+                    disabled={isDisconnecting || isGeneratingQr}
+                    className="w-full py-2.5 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-semibold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 disabled:opacity-50"
+                    title="Cierra el socket y purga credenciales locales de la línea"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                    <span>🗑️ Desvincular y Limpiar Sesión en Disco</span>
                   </button>
                 </div>
               </>

@@ -17,6 +17,7 @@ import {
   analyzeReceiptOcrHandler,
   verifyAuthToken,
   getLineContactsHandler,
+  autoRestoreExistingSessions,
 } from './server/whatsappQrBridge';
 
 function bcvServerProxyPlugin(): Plugin {
@@ -30,6 +31,11 @@ function bcvServerProxyPlugin(): Plugin {
 
       // Verificación de integridad del branding: siembra el logo oficial o migra documentos heredados (con respaldo)
       ensureBrandingIntegrity();
+
+      // Auto-restaurar sesiones de WhatsApp existentes en segundo plano
+      autoRestoreExistingSessions().catch((err) => {
+        console.warn('[Vite Server] Aviso al auto-restaurar sesiones de WhatsApp:', err?.message || err);
+      });
 
       const handleRateRequest = async (_req: any, res: any) => {
         try {
