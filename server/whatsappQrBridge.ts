@@ -500,7 +500,9 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
     browser: Browsers.macOS('Desktop'),
     printQRInTerminal: false,
     syncFullHistory: false,
-    connectTimeoutMs: 30000,
+    markOnlineOnConnect: true,
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
   });
 
@@ -529,6 +531,7 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
           estado: 'QR_EXPIRADO',
           uptimeSeconds: 0,
           qrCodeDataUri: undefined,
+          numeroConectado: undefined,
           lastError: 'El código QR expiró por inactividad. Haga clic en Refrescar para generar uno nuevo.',
         };
         activeLinesState.set(lineaId, expiredState);
@@ -536,6 +539,9 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
         await syncLineToFirestore(lineaId, {
           estado: 'QR_EXPIRADO',
           qrCodeDataUri: FieldValue.delete(),
+          numeroTelefono: FieldValue.delete(),
+          numeroConectado: FieldValue.delete(),
+          isOnline: false,
         });
 
         try {
@@ -547,15 +553,15 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
 
       try {
         const qrDataUri = await QRCode.toDataURL(qr, { margin: 2, scale: 8 });
-        const currentState = activeLinesState.get(lineaId) || {
+        const currentState: WhatsAppQrBridgeStatus = {
           lineaId,
           estado: 'ESPERANDO_QR',
           uptimeSeconds: 0,
+          qrCodeDataUri: qrDataUri,
+          qrExpiresAt: Date.now() + 20000,
+          qrRotations: rotations,
+          numeroConectado: undefined,
         };
-        currentState.estado = 'ESPERANDO_QR';
-        currentState.qrCodeDataUri = qrDataUri;
-        currentState.qrExpiresAt = Date.now() + 20000;
-        currentState.qrRotations = rotations;
         activeLinesState.set(lineaId, currentState);
 
         await syncLineToFirestore(lineaId, {
@@ -563,6 +569,9 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
           qrCodeDataUri: qrDataUri,
           qrExpiresAt: currentState.qrExpiresAt,
           qrRotations: rotations,
+          numeroTelefono: FieldValue.delete(),
+          numeroConectado: FieldValue.delete(),
+          isOnline: false,
         });
       } catch (qrErr) {
         console.error(`[WhatsApp Bridge] Error generando imagen QR:`, qrErr);
@@ -610,10 +619,11 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
     if (connection === 'close') {
       const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+      const isBadSession = statusCode === DisconnectReason.badSession;
       const isRestartRequired = statusCode === DisconnectReason.restartRequired; // 515
 
       console.log(
-        `[WhatsApp Bridge] Conexión cerrada para ${lineaId}. Código: ${statusCode}. LoggedOut: ${isLoggedOut}. RestartRequired: ${isRestartRequired}`
+        `[WhatsApp Bridge] Conexión cerrada para ${lineaId}. Código: ${statusCode}. LoggedOut: ${isLoggedOut}. BadSession: ${isBadSession}. RestartRequired: ${isRestartRequired}`
       );
 
       activeSockets.delete(lineaId);
@@ -627,42 +637,17 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
         return;
       }
 
-      // Logout definitivo por el usuario desde su teléfono
-      if (isLoggedOut) {
-        console.log(`[WhatsApp Bridge] Sesión desvinculada definitivamente por WhatsApp para ${lineaId}.`);
-        const currentState: WhatsAppQrBridgeStatus = {
-          lineaId,
-          estado: 'DESCONECTADO',
-          uptimeSeconds: 0,
-        };
-        activeLinesState.set(lineaId, currentState);
-
-        await syncLineToFirestore(lineaId, {
-          estado: 'DESCONECTADO',
-          numeroTelefono: FieldValue.delete(),
-          numeroConectado: FieldValue.delete(),
-          qrCodeDataUri: FieldValue.delete(),
-          isOnline: false,
-        });
-
-        await deleteSessionFromFirestore(lineaId);
-        try {
-          fs.rmSync(sessionDir, { recursive: true, force: true });
-        } catch {}
-
-        await logWhatsAppAudit({
-          lineaId,
-          evento: 'DESCONEXION_REMOTA',
-          timestamp: Date.now(),
-          detalles: 'Sesión cerrada desde WhatsApp Móvil',
-        });
+      // Logout o sesión corrupta: purgar disco, limpiar número y forzar nuevo QR limpio
+      if (isLoggedOut || isBadSession) {
+        console.log(`[WhatsApp Bridge] Sesión desvinculada o corrupta para ${lineaId}. Purgando y generando nuevo QR...`);
+        forceResetAndUnlinkSession(lineaId, true).catch(console.error);
         return;
       }
 
-      // Reconexión si la línea estaba previamente activa
+      // Reconexión automática para errores transitorios de red
       const current = activeLinesState.get(lineaId);
-      if (current?.estado === 'CONECTADO') {
-        console.log(`[WhatsApp Bridge] Reconectando ${lineaId} en 3 segundos...`);
+      if (current?.estado === 'CONECTADO' || current?.estado === 'CONECTANDO') {
+        console.log(`[WhatsApp Bridge] Reconexión automática de ${lineaId} tras caída transitoria (${statusCode || 'desconocido'})...`);
         setTimeout(() => {
           initializeBaileysSocket(lineaId).catch(console.error);
         }, 3000);
@@ -795,10 +780,27 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
 }
 
 /**
- * Consulta el estado de una línea de WhatsApp
+ * Consulta el estado de una línea de WhatsApp (SSoT y Anti-Split-Brain)
  */
 export async function getWhatsAppLineStatusHandler(lineaId: string): Promise<WhatsAppQrBridgeStatus> {
   const current = activeLinesState.get(lineaId);
+  const sock = activeSockets.get(lineaId);
+
+  // Auto-reconectar silenciosamente si hay credenciales válidas en disco pero no hay socket activo
+  if (!sock && (!current || current.estado === 'DESCONECTADO')) {
+    const sessionDir = getSessionDir(lineaId);
+    const credsFile = path.join(sessionDir, 'creds.json');
+    if (fs.existsSync(credsFile)) {
+      try {
+        const creds = JSON.parse(fs.readFileSync(credsFile, 'utf-8'));
+        if (creds?.me?.id) {
+          console.log(`[WhatsApp Bridge] getWhatsAppLineStatusHandler detectó creds.json para ${lineaId}. Auto-reconectando en segundo plano...`);
+          initializeBaileysSocket(lineaId).catch(console.error);
+        }
+      } catch {}
+    }
+  }
+
   if (!current) {
     const fallback: WhatsAppQrBridgeStatus = {
       lineaId,
@@ -809,10 +811,22 @@ export async function getWhatsAppLineStatusHandler(lineaId: string): Promise<Wha
     return fallback;
   }
 
+  // Regla de Hierro 1: Verdad Única de Estado de Conexión
+  // Una línea SOLO puede reportar 'CONECTADO' si el socket existe activamente en memoria y está abierto
   if (current.estado === 'CONECTADO') {
-    current.uptimeSeconds = Math.floor(
-      (Date.now() - (lineStartTimes.get(lineaId) || Date.now())) / 1000
-    );
+    if (!sock || !sock.user?.id) {
+      console.warn(`[WhatsApp Bridge] Split-Brain corregido en ${lineaId}: estado era CONECTADO pero no hay socket activo en memoria.`);
+      current.estado = 'DESCONECTADO';
+      current.numeroConectado = undefined;
+      current.qrCodeDataUri = undefined;
+    } else {
+      current.uptimeSeconds = Math.floor(
+        (Date.now() - (lineStartTimes.get(lineaId) || Date.now())) / 1000
+      );
+    }
+  } else {
+    // Si NO está CONECTADO, PROHIBIDO devolver número conectado residual
+    current.numeroConectado = undefined;
   }
 
   return current;
@@ -845,6 +859,12 @@ export async function autoRestoreExistingSessions(): Promise<void> {
 
       if (hasValidCreds && !activeSockets.has(lineaId)) {
         console.log(`[WhatsApp Bridge] Sesión existente detectada para ${lineaId}. Auto-reconectando Baileys en segundo plano...`);
+        const currentState: WhatsAppQrBridgeStatus = {
+          lineaId,
+          estado: 'CONECTANDO' as any,
+          uptimeSeconds: 0,
+        };
+        activeLinesState.set(lineaId, currentState);
         initializeBaileysSocket(lineaId).catch((err) => {
           console.warn(`[WhatsApp Bridge] Aviso al auto-reconectar ${lineaId}:`, err?.message || err);
         });
@@ -856,6 +876,130 @@ export async function autoRestoreExistingSessions(): Promise<void> {
 }
 
 /**
+ * Función nuclear para desvincular forzosamente y opcionalmente generar nuevo QR de inmediato
+ */
+export async function forceResetAndUnlinkSession(
+  lineaId: string,
+  generateNewQr: boolean = false
+): Promise<{
+  success: boolean;
+  estado: 'CONECTADO' | 'ESPERANDO_QR' | 'DESCONECTADO' | 'QR_EXPIRADO' | 'ERROR';
+  qrCodeDataUri?: string;
+  message: string;
+}> {
+  qrRotationCounters.set(lineaId, 0);
+
+  // 1. Desmantelar y cerrar socket inmediatamente
+  const sock = activeSockets.get(lineaId);
+  if (sock) {
+    try {
+      sock.ev.removeAllListeners('connection.update');
+      sock.ev.removeAllListeners('creds.update');
+      sock.ev.removeAllListeners('messages.upsert');
+      sock.ev.removeAllListeners('messaging-history.set');
+      sock.ev.removeAllListeners('contacts.upsert');
+      sock.ev.removeAllListeners('contacts.update');
+      (sock.ev as any).removeAllListeners?.();
+    } catch {}
+
+    try {
+      (sock.ws as any)?.close?.();
+    } catch {}
+
+    try {
+      sock.end(undefined);
+    } catch {}
+
+    activeSockets.delete(lineaId);
+  }
+
+  // 2. Establecer estado limpio en memoria
+  const state: WhatsAppQrBridgeStatus = {
+    lineaId,
+    estado: generateNewQr ? 'ESPERANDO_QR' : 'DESCONECTADO',
+    uptimeSeconds: 0,
+    numeroConectado: undefined,
+    qrCodeDataUri: undefined,
+  };
+  activeLinesState.set(lineaId, state);
+
+  // 3. Eliminar sesión física en disco
+  const sessionDir = getSessionDir(lineaId);
+  try {
+    if (fs.existsSync(sessionDir)) {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+    }
+  } catch (err) {
+    console.warn(`[WhatsApp Bridge] Aviso al borrar ${sessionDir}:`, err);
+  }
+
+  // 4. Limpiar caché de memoria de contactos
+  contactsMemoryCache.delete(lineaId);
+
+  // 5. Eliminar de Firestore si hay credenciales administrativas
+  if (hasAdminCredentials) {
+    await deleteSessionFromFirestore(lineaId);
+    await syncLineToFirestore(lineaId, {
+      estado: generateNewQr ? 'ESPERANDO_QR' : 'DESCONECTADO',
+      numeroTelefono: FieldValue.delete(),
+      numeroConectado: FieldValue.delete(),
+      qrCodeDataUri: FieldValue.delete(),
+      isOnline: false,
+      lastActivityTimestamp: Date.now(),
+    });
+  }
+
+  await logWhatsAppAudit({
+    lineaId,
+    evento: generateNewQr ? 'REINICIO_FORZADO_QR' : 'LINEA_DESVINCULADA_MANUAL',
+    timestamp: Date.now(),
+    detalles: generateNewQr
+      ? 'Sesión purgada y generación de nuevo QR forzada'
+      : 'Línea desvinculada manualmente por el operador administrativo',
+  });
+
+  if (!generateNewQr) {
+    return {
+      success: true,
+      estado: 'DESCONECTADO',
+      message: `Línea ${lineaId} desvinculada y sesión eliminada con éxito`,
+    };
+  }
+
+  // Si se solicitó nuevo QR, inicializar Baileys y esperar la emisión del QR
+  try {
+    await initializeBaileysSocket(lineaId);
+
+    let current = activeLinesState.get(lineaId);
+    let waited = 0;
+    while (
+      !current?.qrCodeDataUri &&
+      current?.estado !== 'CONECTADO' &&
+      current?.estado !== 'QR_EXPIRADO' &&
+      waited < 8000
+    ) {
+      await new Promise((r) => setTimeout(r, 200));
+      waited += 200;
+      current = activeLinesState.get(lineaId);
+    }
+
+    return {
+      success: true,
+      estado: current?.estado || 'ESPERANDO_QR',
+      qrCodeDataUri: current?.qrCodeDataUri,
+      message: 'Sesión purgada y nuevo código QR generado con éxito',
+    };
+  } catch (initErr: any) {
+    console.error(`[WhatsApp Bridge] Error iniciando nuevo socket post-purge en ${lineaId}:`, initErr);
+    return {
+      success: false,
+      estado: 'ERROR',
+      message: `Error al generar nuevo QR: ${initErr.message}`,
+    };
+  }
+}
+
+/**
  * Genera y devuelve el código QR auténtico de WhatsApp
  */
 export async function generateQrCodeHandler(
@@ -863,8 +1007,13 @@ export async function generateQrCodeHandler(
   forceNew: boolean = false
 ): Promise<WhatsAppQrBridgeStatus> {
   if (forceNew) {
-    // Si se solicita forzar nuevo QR, desvincular forzosamente para limpiar sesión zombi en disco y memoria
-    await disconnectWhatsAppLineHandler(lineaId);
+    const res = await forceResetAndUnlinkSession(lineaId, true);
+    return {
+      lineaId,
+      estado: res.estado,
+      qrCodeDataUri: res.qrCodeDataUri,
+      uptimeSeconds: 0,
+    };
   }
 
   // Iniciar socket si no existe
@@ -872,14 +1021,14 @@ export async function generateQrCodeHandler(
     await initializeBaileysSocket(lineaId);
   }
 
-  // Esperar hasta 6 segundos para que WhatsApp emita el QR si aún no está disponible
+  // Esperar hasta 8 segundos para que WhatsApp emita el QR si aún no está disponible
   let current = activeLinesState.get(lineaId);
   let waited = 0;
   while (
     !current?.qrCodeDataUri &&
     current?.estado !== 'CONECTADO' &&
     current?.estado !== 'QR_EXPIRADO' &&
-    waited < 6000
+    waited < 8000
   ) {
     await new Promise((r) => setTimeout(r, 200));
     waited += 200;
@@ -1005,128 +1154,8 @@ export async function sendWhatsAppMessageHandler(
  * Desconecta la sesión de WhatsApp y limpia los archivos de sesión locales y en Firestore
  */
 export async function disconnectWhatsAppLineHandler(lineaId: string): Promise<{ success: boolean; message: string }> {
-  qrRotationCounters.set(lineaId, 0);
-
-  // 1. Establecer estado DESCONECTADO de inmediato en memoria para prevenir auto-reconexiones
-  const state: WhatsAppQrBridgeStatus = {
-    lineaId,
-    estado: 'DESCONECTADO',
-    uptimeSeconds: 0,
-    qrCodeDataUri: undefined,
-  };
-  activeLinesState.set(lineaId, state);
-
-  // 2. Cerrar y desmantelar el socket
-  const sock = activeSockets.get(lineaId);
-  if (sock) {
-    try {
-      sock.ev.removeAllListeners('connection.update');
-      sock.ev.removeAllListeners('creds.update');
-      sock.ev.removeAllListeners('messages.upsert');
-      sock.ev.removeAllListeners('messaging-history.set');
-      sock.ev.removeAllListeners('contacts.upsert');
-      sock.ev.removeAllListeners('contacts.update');
-      (sock.ev as any).removeAllListeners?.();
-    } catch {}
-
-    try {
-      await Promise.race([
-        sock.logout().catch(() => {}),
-        new Promise((resolve) => setTimeout(resolve, 1500)),
-      ]);
-    } catch {}
-
-    try {
-      sock.end(undefined);
-    } catch {}
-
-    activeSockets.delete(lineaId);
-  }
-
-  // 3. Eliminar sesión física en disco
-  const sessionDir = getSessionDir(lineaId);
-  try {
-    if (fs.existsSync(sessionDir)) {
-      fs.rmSync(sessionDir, { recursive: true, force: true });
-    }
-  } catch (err) {
-    console.warn(`[WhatsApp Bridge] Aviso al borrar ${sessionDir}:`, err);
-  }
-
-  // 4. Limpiar caché de memoria de contactos
-  contactsMemoryCache.delete(lineaId);
-
-  // 5. Eliminar de Firestore si hay credenciales administrativas
-  if (hasAdminCredentials) {
-    await deleteSessionFromFirestore(lineaId);
-  }
-
-  // 6. Sincronizar estado en Firestore si hay credenciales
-  if (hasAdminCredentials) {
-    await syncLineToFirestore(lineaId, {
-      estado: 'DESCONECTADO',
-      numeroTelefono: FieldValue.delete(),
-      numeroConectado: FieldValue.delete(),
-      qrCodeDataUri: FieldValue.delete(),
-      isOnline: false,
-      lastActivityTimestamp: Date.now(),
-    });
-  }
-
-  // 7. Purga DevSecOps de Leads si hay credenciales
-  if (hasAdminCredentials) {
-    try {
-      const entitiesSnap = await adminDb.collection('dual_entities').get();
-      const registeredPhoneDigits = new Set<string>();
-      entitiesSnap.forEach((d) => {
-        const data = d.data();
-        const p1 = (data.phone || '').replace(/\D/g, '');
-        const p2 = (data.telefonoContacto || '').replace(/\D/g, '');
-        if (p1.length >= 7) registeredPhoneDigits.add(p1.slice(-10));
-        if (p2.length >= 7) registeredPhoneDigits.add(p2.slice(-10));
-      });
-
-      const messagesSnap = await adminDb
-        .collection('whatsapp_mensajes')
-        .where('lineaId', '==', lineaId)
-        .get();
-
-      const batch = adminDb.batch();
-      let purgedCount = 0;
-
-      messagesSnap.forEach((doc) => {
-        const msg = doc.data();
-        const remDigits = (msg.remitenteTelefono || '').replace(/\D/g, '').slice(-10);
-        const destDigits = (msg.destinatarioTelefono || '').replace(/\D/g, '').slice(-10);
-
-        const isRemRegistered = remDigits && registeredPhoneDigits.has(remDigits);
-        const isDestRegistered = destDigits && registeredPhoneDigits.has(destDigits);
-
-        if (!isRemRegistered && !isDestRegistered) {
-          batch.delete(doc.ref);
-          purgedCount++;
-        }
-      });
-
-      if (purgedCount > 0) {
-        await batch.commit();
-        console.log(`[WhatsApp Bridge] Purga DevSecOps: ${purgedCount} mensajes de Leads eliminados tras desvincular.`);
-      }
-    } catch (purgeErr: any) {
-      if (!purgeErr?.message?.includes('PERMISSION_DENIED') && purgeErr?.code !== 7) {
-        console.warn('[WhatsApp Bridge] Error durante purga automática de Leads:', purgeErr);
-      }
-    }
-  }
-
-  await logWhatsAppAudit({
-    lineaId,
-    evento: 'LINEA_DESVINCULADA_MANUAL',
-    timestamp: Date.now(),
-    detalles: 'Línea desvinculada manualmente por el operador administrativo',
-  });
-
-  return { success: true, message: `Línea ${lineaId} desvinculada y sesión eliminada con éxito` };
+  const res = await forceResetAndUnlinkSession(lineaId, false);
+  return { success: res.success, message: res.message };
 }
 
 /**

@@ -9,3 +9,5 @@ coverage/
 .whatsapp_sessions/
 serviceAccountKey.json
 scratch/
+bun.lock
+bun.lockb

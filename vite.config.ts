@@ -13,6 +13,7 @@ import {
   confirmPairingHandler,
   sendWhatsAppMessageHandler,
   disconnectWhatsAppLineHandler,
+  forceResetAndUnlinkSession,
   deleteWhatsAppChatHandler,
   analyzeReceiptOcrHandler,
   verifyAuthToken,
@@ -287,25 +288,98 @@ function bcvServerProxyPlugin(): Plugin {
       server.middlewares.use('/api/fetchBCVRate', handleRateRequest);
       server.middlewares.use('/api/sync-bcv', handleRateRequest);
 
-      // WhatsApp QR Bridge Middlewares (DevSecOps Protegidos con Caché No-Store)
-      server.middlewares.use('/api/whatsapp/status', async (req: any, res: any) => {
-        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      // Helper unificado para extraer parámetros (Query String y/o Body JSON/Form)
+      const readRequestPayload = async (req: any): Promise<{ lineaId: string; force: boolean; [key: string]: any }> => {
         const reqUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost:3000'}`);
-        const lineaId = reqUrl.searchParams.get('lineaId') || 'linea_cobranzas';
+        const queryLineaId = reqUrl.searchParams.get('lineaId');
+        const queryForce = reqUrl.searchParams.get('force') === 'true';
+
+        let bodyParsed: Record<string, any> = {};
+        if (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE') {
+          let bodyData = '';
+          for await (const chunk of req) {
+            bodyData += chunk;
+          }
+          if (bodyData.trim()) {
+            try {
+              bodyParsed = JSON.parse(bodyData);
+            } catch {
+              const usp = new URLSearchParams(bodyData);
+              for (const [k, v] of usp.entries()) {
+                bodyParsed[k] = v;
+              }
+            }
+          }
+        }
+
+        const lineaId = bodyParsed.lineaId || queryLineaId || 'linea_cobranzas';
+        const force = bodyParsed.force === true || bodyParsed.force === 'true' || queryForce;
+
+        return { ...bodyParsed, lineaId, force };
+      };
+
+      // 1. Endpoint /api/whatsapp/status (SSoT en tiempo real)
+      const handleStatus = async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        const { lineaId } = await readRequestPayload(req);
         const status = await getWhatsAppLineStatusHandler(lineaId);
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true, ...status }));
-      });
+      };
+      server.middlewares.use('/api/whatsapp/status', handleStatus);
+      server.middlewares.use('/api/whatsapp-qr/status', handleStatus);
 
-      server.middlewares.use('/api/whatsapp/qr', async (req: any, res: any) => {
+      // 2. Endpoint /api/whatsapp/qr
+      const handleQr = async (req: any, res: any) => {
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-        const reqUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost:3000'}`);
-        const lineaId = reqUrl.searchParams.get('lineaId') || 'linea_cobranzas';
-        const forceNew = reqUrl.searchParams.get('force') === 'true';
-        const qr = await generateQrCodeHandler(lineaId, forceNew);
+        const { lineaId, force } = await readRequestPayload(req);
+        const qr = await generateQrCodeHandler(lineaId, force);
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true, ...qr }));
-      });
+      };
+      server.middlewares.use('/api/whatsapp/qr', handleQr);
+      server.middlewares.use('/api/whatsapp-qr/qr', handleQr);
+
+      // 3. Endpoint /api/whatsapp/force-qr (Nuclear: Purgar y generar nuevo QR de inmediato)
+      const handleForceQr = async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        const authHeader = req.headers['authorization'] || '';
+        const auth = await verifyAuthToken(authHeader);
+        if (!auth.authorized) {
+          res.statusCode = 401;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: auth.error }));
+          return;
+        }
+        const { lineaId } = await readRequestPayload(req);
+        const result = await forceResetAndUnlinkSession(lineaId, true);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify(result));
+      };
+      server.middlewares.use('/api/whatsapp/force-qr', handleForceQr);
+      server.middlewares.use('/api/whatsapp-qr/force-qr', handleForceQr);
+
+      // 4. Endpoint /api/whatsapp/disconnect (Desvincular y limpiar sesión en disco)
+      const handleDisconnect = async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        const authHeader = req.headers['authorization'] || '';
+        const auth = await verifyAuthToken(authHeader);
+        if (!auth.authorized) {
+          res.statusCode = 401;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, error: auth.error }));
+          return;
+        }
+        const { lineaId } = await readRequestPayload(req);
+        const result = await forceResetAndUnlinkSession(lineaId, false);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify(result));
+      };
+      server.middlewares.use('/api/whatsapp/disconnect', handleDisconnect);
+      server.middlewares.use('/api/whatsapp/unlink', handleDisconnect);
+      server.middlewares.use('/api/whatsapp/logout', handleDisconnect);
+      server.middlewares.use('/api/whatsapp-qr/disconnect', handleDisconnect);
+      server.middlewares.use('/api/whatsapp-qr/unlink', handleDisconnect);
 
       server.middlewares.use('/api/whatsapp/send', async (req: any, res: any) => {
         res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -339,41 +413,6 @@ function bcvServerProxyPlugin(): Plugin {
               parsed.clientMsgId,
               parsed.destinatarioNombre
             );
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify(result));
-          } catch (e: any) {
-            res.statusCode = 500;
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ success: false, error: e.message }));
-          }
-        });
-      });
-
-      server.middlewares.use('/api/whatsapp/disconnect', async (req: any, res: any) => {
-        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-        if (req.method !== 'POST') {
-          res.statusCode = 405;
-          res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ success: false, error: 'Method Not Allowed' }));
-          return;
-        }
-
-        // Validación DevSecOps de autorización Bearer
-        const authHeader = req.headers['authorization'] || '';
-        const auth = await verifyAuthToken(authHeader);
-        if (!auth.authorized) {
-          res.statusCode = 401;
-          res.setHeader('Content-Type', 'application/json');
-          res.end(JSON.stringify({ success: false, error: auth.error }));
-          return;
-        }
-
-        let body = '';
-        req.on('data', (chunk: any) => (body += chunk));
-        req.on('end', async () => {
-          try {
-            const parsed = body ? JSON.parse(body) : {};
-            const result = await disconnectWhatsAppLineHandler(parsed.lineaId || 'linea_cobranzas');
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify(result));
           } catch (e: any) {

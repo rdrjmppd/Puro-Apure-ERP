@@ -226,24 +226,34 @@ export class WhatsAppCloneService {
   }
 
   /**
-   * Actualiza el estado de una línea de forma resiliente con merge
+   * Actualiza el estado de una línea de forma resiliente con merge (SSoT)
    */
   static async updateLineStatus(
     lineaId: string,
     estado: WhatsAppLine['estado'],
+    numeroTelefono?: string,
     qrDataUri?: string
   ): Promise<boolean> {
     try {
       const ref = doc(db, LINES_COLLECTION, lineaId);
-      await setDoc(
-        ref,
-        {
-          id: lineaId,
-          lastActivityTimestamp: Date.now(),
-          isOnline: estado === 'CONECTADO',
-        },
-        { merge: true }
-      );
+      const isOnline = estado === 'CONECTADO';
+      const payload: Record<string, any> = {
+        id: lineaId,
+        estado,
+        isOnline,
+        lastActivityTimestamp: Date.now(),
+      };
+      if (isOnline && numeroTelefono) {
+        payload.numeroTelefono = numeroTelefono;
+        payload.numeroConectado = numeroTelefono;
+      } else {
+        payload.numeroTelefono = '';
+        payload.numeroConectado = '';
+      }
+      if (qrDataUri) {
+        payload.qrCodeDataUri = qrDataUri;
+      }
+      await setDoc(ref, payload, { merge: true });
       return true;
     } catch (err: any) {
       console.warn('[WhatsAppCloneService] Advertencia actualizando estado de línea:', err?.message || err);
@@ -252,7 +262,7 @@ export class WhatsAppCloneService {
   }
 
   /**
-   * Consulta el estado en vivo del puente de servidor
+   * Consulta el estado en vivo del puente de servidor (SSoT)
    */
   static async getLineLiveStatus(lineaId: string): Promise<{
     success: boolean;
@@ -262,7 +272,7 @@ export class WhatsAppCloneService {
     lastError?: string;
   }> {
     try {
-      const res = await fetch(`/api/whatsapp/status?lineaId=${lineaId}`, {
+      const res = await fetch(`/api/whatsapp/status?lineaId=${encodeURIComponent(lineaId)}`, {
         cache: 'no-store',
       }).then((r) => r.json());
       return res;
@@ -285,10 +295,14 @@ export class WhatsAppCloneService {
     lastError?: string;
   }> {
     try {
-      const res = await fetch(
-        `/api/whatsapp/qr?lineaId=${lineaId}${forceNew ? '&force=true' : ''}`,
-        { cache: 'no-store' }
-      ).then((r) => r.json());
+      const endpoint = forceNew
+        ? `/api/whatsapp/force-qr?lineaId=${encodeURIComponent(lineaId)}`
+        : `/api/whatsapp/qr?lineaId=${encodeURIComponent(lineaId)}`;
+      const res = await fetch(endpoint, {
+        method: forceNew ? 'POST' : 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+      }).then((r) => r.json());
       return res;
     } catch (err: any) {
       return { success: false, estado: 'ERROR', lastError: err.message };
@@ -307,7 +321,7 @@ export class WhatsAppCloneService {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const res = await fetch('/api/whatsapp/disconnect', {
+      const res = await fetch(`/api/whatsapp/disconnect?lineaId=${encodeURIComponent(lineaId)}`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ lineaId }),
@@ -317,7 +331,7 @@ export class WhatsAppCloneService {
         return { success: false, error: res.error || 'Error al desvincular' };
       }
 
-      await this.updateLineStatus(lineaId, 'DESCONECTADO');
+      await this.updateLineStatus(lineaId, 'DESCONECTADO', '');
       return { success: true };
     } catch (err: any) {
       console.error('[WhatsAppCloneService] Error al desvincular línea:', err);
@@ -336,8 +350,29 @@ export class WhatsAppCloneService {
     lastError?: string;
   }> {
     try {
-      await this.disconnectLine(lineaId);
-      return await this.requestQrCode(lineaId, true);
+      const currentUser = auth.currentUser;
+      const token = currentUser ? await currentUser.getIdToken() : '';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(`/api/whatsapp/force-qr?lineaId=${encodeURIComponent(lineaId)}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ lineaId, force: true }),
+      }).then((r) => r.json());
+
+      const estado = res.estado || (res.success ? 'ESPERANDO_QR' : 'ERROR');
+      const qrDataUri = res.qrCodeDataUri || res.qrDataUri;
+
+      await this.updateLineStatus(lineaId, estado, undefined, qrDataUri);
+
+      return {
+        success: res.success,
+        estado,
+        qrCodeDataUri: qrDataUri,
+        qrDataUri: qrDataUri,
+        lastError: res.error || res.lastError || res.message,
+      };
     } catch (err: any) {
       console.error('[WhatsAppCloneService] Error al forzar nuevo QR:', err);
       return { success: false, estado: 'ERROR', lastError: err.message };

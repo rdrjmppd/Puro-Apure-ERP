@@ -93,6 +93,19 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
   const [isHybridMode, setIsHybridMode] = useState<boolean>(false);
   const wasWaitingQrOnOpenRef = useRef<boolean>(false);
 
+  // Estado verificado en vivo con el socket de Baileys en el servidor (SSoT Anti Split-Brain)
+  const [liveBridgeStatus, setLiveBridgeStatus] = useState<{
+    estado: WhatsAppLine['estado'];
+    numeroConectado?: string;
+    qrCodeDataUri?: string;
+  }>({
+    estado: 'DESCONECTADO',
+  });
+
+  const isLineLiveConnected = useMemo(() => {
+    return liveBridgeStatus.estado === 'CONECTADO' && !!liveBridgeStatus.numeroConectado;
+  }, [liveBridgeStatus]);
+
   // 2. Estado de Directorio y Chats
   const [selectedContactPhone, setSelectedContactPhone] = useState<string>('');
   const [searchFilter, setSearchFilter] = useState<string>('');
@@ -419,9 +432,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     const text = (textToSend || messageInput).trim();
     if (!text || !selectedContactPhone || isSending) return;
 
-    if (!activeLine || activeLine.estado !== 'CONECTADO') {
+    if (!isLineLiveConnected) {
       setErrorMessage(
-        `La línea ${activeLine?.nombre || activeLineId} no está conectada activamente a WhatsApp (Estado: ${activeLine?.estado || 'DESCONECTADO'}). Escanee el código QR para vincular su cuenta.`
+        `La línea ${activeLine?.nombre || activeLineId} no está conectada activamente a WhatsApp (Estado: ${liveBridgeStatus.estado || 'DESCONECTADO'}). Escanee el código QR para vincular su cuenta.`
       );
       handleOpenQrModal(false);
       return;
@@ -431,7 +444,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     setErrorMessage(null);
     const res = await WhatsAppCloneService.sendWhatsAppMessage(
       activeLineId,
-      activeLine.numeroTelefono || '',
+      liveBridgeStatus.numeroConectado || activeLine?.numeroTelefono || '',
       selectedContactPhone,
       text,
       'TEXTO',
@@ -456,9 +469,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     const file = e.target.files?.[0];
     if (!file || !selectedContactPhone) return;
 
-    if (!activeLine || activeLine.estado !== 'CONECTADO') {
+    if (!isLineLiveConnected) {
       setErrorMessage(
-        `La línea ${activeLine?.nombre || activeLineId} no está conectada activamente a WhatsApp (Estado: ${activeLine?.estado || 'DESCONECTADO'}). Escanee el código QR para vincular su cuenta.`
+        `La línea ${activeLine?.nombre || activeLineId} no está conectada activamente a WhatsApp (Estado: ${liveBridgeStatus.estado || 'DESCONECTADO'}). Escanee el código QR para vincular su cuenta.`
       );
       handleOpenQrModal(false);
       return;
@@ -556,15 +569,18 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     }
   };
 
-  // Polling automático del estado del QR auténtico mientras el modal está abierto
+  // Polling automático del estado en vivo del socket de WhatsApp (SSoT Anti Split-Brain)
   useEffect(() => {
-    if (!showQrModal) return;
-
     let isMounted = true;
     const fetchStatusAndQr = async () => {
       try {
         const res = await WhatsAppCloneService.getLineLiveStatus(activeLineId);
         if (isMounted && res.success) {
+          setLiveBridgeStatus({
+            estado: res.estado,
+            numeroConectado: res.numeroConectado,
+            qrCodeDataUri: res.qrCodeDataUri,
+          });
           if (res.qrCodeDataUri) {
             setQrDataUri(res.qrCodeDataUri);
           }
@@ -584,7 +600,8 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     };
 
     fetchStatusAndQr();
-    const interval = setInterval(fetchStatusAndQr, 3000);
+    const intervalTime = showQrModal ? 2500 : 10000;
+    const interval = setInterval(fetchStatusAndQr, intervalTime);
     return () => {
       isMounted = false;
       clearInterval(interval);
@@ -593,19 +610,36 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
 
   // Abrir modal QR y solicitar generación a Baileys o gestión de línea conectada
   const handleOpenQrModal = async (forceNew: boolean = false) => {
-    const isCurrentlyConnected = activeLine?.estado === 'CONECTADO';
-    wasWaitingQrOnOpenRef.current = !isCurrentlyConnected || forceNew;
-
-    setIsGeneratingQr(!isCurrentlyConnected || forceNew);
+    setIsGeneratingQr(true);
     setShowQrModal(true);
     setErrorMessage(null);
-    setQrDataUri(forceNew ? null : (activeLine?.qrCodeDataUri || null));
 
-    if (!isCurrentlyConnected || forceNew) {
+    // Consultar el estado real del socket en el backend de inmediato
+    const live = await WhatsAppCloneService.getLineLiveStatus(activeLineId);
+    const liveConnected = live.success && live.estado === 'CONECTADO' && !!live.numeroConectado;
+    if (live.success) {
+      setLiveBridgeStatus({
+        estado: live.estado,
+        numeroConectado: live.numeroConectado,
+        qrCodeDataUri: live.qrCodeDataUri,
+      });
+    }
+
+    wasWaitingQrOnOpenRef.current = !liveConnected || forceNew;
+    setQrDataUri(forceNew ? null : (live.qrCodeDataUri || activeLine?.qrCodeDataUri || null));
+
+    if (!liveConnected || forceNew) {
       try {
         const res = await WhatsAppCloneService.requestQrCode(activeLineId, forceNew);
         if (res.success && (res.qrCodeDataUri || res.qrDataUri)) {
-          setQrDataUri(res.qrCodeDataUri || res.qrDataUri || null);
+          const freshQr = res.qrCodeDataUri || res.qrDataUri || null;
+          setQrDataUri(freshQr);
+          setLiveBridgeStatus((prev) => ({
+            ...prev,
+            estado: res.estado || 'ESPERANDO_QR',
+            qrCodeDataUri: freshQr || undefined,
+            numeroConectado: undefined,
+          }));
         }
       } catch {
         if (!forceNew && activeLine?.qrCodeDataUri) {
@@ -614,6 +648,8 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
       } finally {
         setIsGeneratingQr(false);
       }
+    } else {
+      setIsGeneratingQr(false);
     }
   };
 
@@ -624,6 +660,11 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     try {
       const res = await WhatsAppCloneService.disconnectLine(activeLineId);
       if (res.success) {
+        setLiveBridgeStatus({
+          estado: 'DESCONECTADO',
+          numeroConectado: undefined,
+          qrCodeDataUri: undefined,
+        });
         setQrDataUri(null);
         wasWaitingQrOnOpenRef.current = true;
         await handleOpenQrModal(true);
@@ -643,11 +684,22 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     setIsDisconnecting(true);
     setErrorMessage(null);
     setQrDataUri(null);
+    setLiveBridgeStatus({
+      estado: 'ESPERANDO_QR',
+      numeroConectado: undefined,
+      qrCodeDataUri: undefined,
+    });
     wasWaitingQrOnOpenRef.current = true;
     try {
       const res = await WhatsAppCloneService.forceResetQr(activeLineId);
       if (res.success && (res.qrDataUri || res.qrCodeDataUri)) {
-        setQrDataUri(res.qrDataUri || res.qrCodeDataUri || null);
+        const freshQr = res.qrDataUri || res.qrCodeDataUri || null;
+        setQrDataUri(freshQr);
+        setLiveBridgeStatus({
+          estado: res.estado || 'ESPERANDO_QR',
+          numeroConectado: undefined,
+          qrCodeDataUri: freshQr || undefined,
+        });
       } else if (res.lastError) {
         setErrorMessage(res.lastError);
       }
@@ -716,7 +768,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
               >
                 <span
                   className={`w-2 h-2 rounded-full ${
-                    l.estado === 'CONECTADO' ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                    (l.id === activeLineId ? isLineLiveConnected : l.estado === 'CONECTADO')
+                      ? 'bg-emerald-400 animate-pulse'
+                      : 'bg-amber-400'
                   }`}
                 />
                 <span>{(l.nombre || l.id || 'Línea').replace('Línea de ', '')}</span>
@@ -728,9 +782,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
           <button
             onClick={() => handleOpenQrModal(false)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition min-h-[44px] cursor-pointer"
-            title={activeLine?.estado === 'CONECTADO' ? 'Ver Estado y Opciones de Desvinculación' : 'Vincular o Reconectar sesión mediante Código QR'}
+            title={isLineLiveConnected ? 'Ver Estado y Opciones de Desvinculación' : 'Vincular o Reconectar sesión mediante Código QR'}
           >
-            {activeLine?.estado === 'CONECTADO' ? (
+            {isLineLiveConnected ? (
               <>
                 <ShieldCheck className="w-4 h-4 text-emerald-400" />
                 <span className="hidden sm:inline">Línea Conectada</span>
@@ -1095,7 +1149,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
               </div>
 
               {/* Banner de Advertencia si la línea no está conectada */}
-              {activeLine?.estado !== 'CONECTADO' && (
+              {!isLineLiveConnected && (
                 <div className="px-3 py-2 bg-amber-950/40 border-t border-amber-500/30 flex items-center justify-between text-xs text-amber-300">
                   <div className="flex items-center gap-2">
                     <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
@@ -1353,14 +1407,16 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
               Abra WhatsApp en su teléfono &gt; Dispositivos vinculados &gt; Vincular un dispositivo.
             </p>
 
-            {activeLine?.estado === 'CONECTADO' && activeLine.numeroTelefono ? (
+            {isLineLiveConnected ? (
               <div className="p-4 rounded-2xl bg-emerald-950/40 border border-emerald-500/40 text-center space-y-3">
                 <div className="w-12 h-12 mx-auto rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
                   <ShieldCheck className="w-6 h-6" />
                 </div>
                 <div>
                   <h4 className="text-xs font-bold text-emerald-300">Línea Conectada en Vivo</h4>
-                  <p className="text-xs text-slate-200 mt-1 font-mono font-bold">{activeLine.numeroTelefono}</p>
+                  <p className="text-xs text-slate-200 mt-1 font-mono font-bold">
+                    {liveBridgeStatus.numeroConectado || activeLine?.numeroTelefono}
+                  </p>
                 </div>
 
                 {errorMessage && (
@@ -1427,9 +1483,9 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                         <RefreshCw className="w-8 h-8 animate-spin" />
                         <span className="text-[10px] font-semibold">Generando QR auténtico...</span>
                       </div>
-                    ) : (qrDataUri || activeLine?.qrCodeDataUri) ? (
+                    ) : (qrDataUri || liveBridgeStatus.qrCodeDataUri || activeLine?.qrCodeDataUri) ? (
                       <img
-                        src={qrDataUri || activeLine?.qrCodeDataUri}
+                        src={qrDataUri || liveBridgeStatus.qrCodeDataUri || activeLine?.qrCodeDataUri}
                         alt="Código QR WhatsApp Auténtico"
                         className="w-full h-full object-contain"
                       />
