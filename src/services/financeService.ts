@@ -20,6 +20,7 @@ import {
 import { db } from '../firebase/config';
 import { offlineSyncEngine } from './offlineSyncEngine';
 import { BcvFeederService, BcvSyncResult } from './bcvFeederService';
+import { sanitizeFirestorePayload } from '../utils/sanitizeFirestorePayload';
 import {
   centsRound,
   round2,
@@ -345,7 +346,7 @@ export class FinanceService {
     }
 
     // Preservar saldos calculados atómicamente si la entidad ya existía
-    const record: DualEntity = {
+    const record: DualEntity = sanitizeFirestorePayload({
       ...entity,
       balanceUSD: existingDoc ? existingDoc.balanceUSD : (entity.balanceUSD || 0),
       balanceVES: existingDoc ? existingDoc.balanceVES : (entity.balanceVES || 0),
@@ -354,7 +355,7 @@ export class FinanceService {
       balancePorCobrarVES: existingDoc ? (existingDoc.balancePorCobrarVES ?? 0) : (entity.balancePorCobrarVES || 0),
       balancePorPagarVES: existingDoc ? (existingDoc.balancePorPagarVES ?? 0) : (entity.balancePorPagarVES || 0),
       lastUpdatedTimestamp: Date.now(),
-    };
+    });
 
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       await offlineSyncEngine.enqueueMutation(

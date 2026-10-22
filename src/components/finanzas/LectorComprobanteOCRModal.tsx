@@ -34,6 +34,7 @@ import {
 import { DualEntity, BillingInvoice } from '../../types/finance';
 import { OcrForensicService } from '../../services/ocrForensicService';
 import { centsRound } from '../../services/financialAnalyticsService';
+import { sanitizeFirestorePayload } from '../../utils/sanitizeFirestorePayload';
 import { useAuth } from '../../context/AuthContext';
 
 interface LectorComprobanteOCRModalProps {
@@ -240,6 +241,16 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
       setMontoOriginal(result.montoOriginal);
       setTasaBcvSnapshot(result.tasaBcvSnapshot);
 
+      // Autocompletar Observaciones de Auditoría con los datos complementarios del comprobante
+      const auditDetails = [
+        result.rifCedula ? `CI/RIF Emisor: ${result.rifCedula}` : '',
+        result.telefonoNombreEmisor ? `Tel: ${result.telefonoNombreEmisor}` : '',
+        result.bancoReceptor ? `Banco Destino: ${result.bancoReceptor}` : '',
+        result.fechaComprobante ? `Fecha: ${result.fechaComprobante}` : '',
+        result.dictamenVeracidad?.candado4_resumen || '',
+      ].filter(Boolean).join(' • ');
+      setNotasRevision(auditDetails);
+
       // Intentar vincular cliente sugerido si existe coincidencia de RIF, Cédula o Teléfono
       if (entities.length > 0) {
         let matched: DualEntity | undefined;
@@ -282,25 +293,25 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
     setIsSaving(true);
     setErrorMsg(null);
 
-    const recordToSave: PagoReportadoOCR = {
+    const recordToSave: PagoReportadoOCR = sanitizeFirestorePayload({
       ...analyzedRecord,
-      clienteIdSugerido: selectedEntityId || undefined,
-      clienteNombreSugerido: entities.find((e) => e.id === selectedEntityId)?.name,
-      facturaIdSeleccionada: selectedInvoiceId || undefined,
-      facturaCodigoSeleccionada: invoices.find((i) => i.id === selectedInvoiceId)?.invoiceNumber,
-      tipoComprobante: tipoComprobante as any,
-      bancoEmisor,
-      bancoReceptor,
-      numeroReferencia,
-      referenciaNormalizada: numeroReferencia.toUpperCase().replace(/[^A-Z0-9]/g, ''),
-      monedaOriginal,
-      montoOriginal: centsRound(montoOriginal),
-      tasaBcvSnapshot,
-      montoEquivalenteUSD,
-      montoEquivalenteVES,
-      notasRevision,
+      clienteIdSugerido: selectedEntityId || '',
+      clienteNombreSugerido: entities.find((e) => e.id === selectedEntityId)?.name || '',
+      facturaIdSeleccionada: selectedInvoiceId || '',
+      facturaCodigoSeleccionada: invoices.find((i) => i.id === selectedInvoiceId)?.invoiceNumber || '',
+      tipoComprobante: (tipoComprobante as any) || 'PAGO_MOVIL',
+      bancoEmisor: bancoEmisor || '',
+      bancoReceptor: bancoReceptor || '',
+      numeroReferencia: numeroReferencia || '',
+      referenciaNormalizada: (numeroReferencia || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+      monedaOriginal: monedaOriginal || 'VES',
+      montoOriginal: centsRound(montoOriginal || 0),
+      tasaBcvSnapshot: tasaBcvSnapshot || 1,
+      montoEquivalenteUSD: montoEquivalenteUSD || 0,
+      montoEquivalenteVES: montoEquivalenteVES || 0,
+      notasRevision: notasRevision || '',
       updatedTimestamp: Date.now(),
-    };
+    });
 
     const res = await OcrForensicService.saveReportedPayment(recordToSave);
     setIsSaving(false);
@@ -324,25 +335,25 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
     const entity = entities.find((e) => e.id === selectedEntityId);
 
     // Guardar primero el registro en Firestore para asegurar que existe
-    const recordToSave: PagoReportadoOCR = {
+    const recordToSave: PagoReportadoOCR = sanitizeFirestorePayload({
       ...analyzedRecord,
-      clienteIdSugerido: selectedEntityId || undefined,
-      clienteNombreSugerido: entity?.name,
-      facturaIdSeleccionada: selectedInvoiceId || undefined,
-      facturaCodigoSeleccionada: invoices.find((i) => i.id === selectedInvoiceId)?.invoiceNumber,
-      tipoComprobante: tipoComprobante as any,
-      bancoEmisor,
-      bancoReceptor,
-      numeroReferencia,
-      referenciaNormalizada: numeroReferencia.toUpperCase().replace(/[^A-Z0-9]/g, ''),
-      monedaOriginal,
-      montoOriginal: centsRound(montoOriginal),
-      tasaBcvSnapshot,
-      montoEquivalenteUSD,
-      montoEquivalenteVES,
-      notasRevision,
+      clienteIdSugerido: selectedEntityId || '',
+      clienteNombreSugerido: entity?.name || '',
+      facturaIdSeleccionada: selectedInvoiceId || '',
+      facturaCodigoSeleccionada: invoices.find((i) => i.id === selectedInvoiceId)?.invoiceNumber || '',
+      tipoComprobante: (tipoComprobante as any) || 'PAGO_MOVIL',
+      bancoEmisor: bancoEmisor || '',
+      bancoReceptor: bancoReceptor || '',
+      numeroReferencia: numeroReferencia || '',
+      referenciaNormalizada: (numeroReferencia || '').toUpperCase().replace(/[^A-Z0-9]/g, ''),
+      monedaOriginal: monedaOriginal || 'VES',
+      montoOriginal: centsRound(montoOriginal || 0),
+      tasaBcvSnapshot: tasaBcvSnapshot || 1,
+      montoEquivalenteUSD: montoEquivalenteUSD || 0,
+      montoEquivalenteVES: montoEquivalenteVES || 0,
+      notasRevision: notasRevision || '',
       updatedTimestamp: Date.now(),
-    };
+    });
 
     await OcrForensicService.saveReportedPayment(recordToSave);
 

@@ -132,14 +132,16 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
 
   // 4. Modo Móvil (Pestañas en pantalla < 768px)
   const [mobileTab, setMobileTab] = useState<'CHATS' | 'CONVERSACION' | 'EXPEDIENTE'>('CHATS');
+  const [syncedContacts, setSyncedContacts] = useState<Record<string, { id: string; name?: string; phone?: string }>>({});
 
   // 5. Referencia al contenedor de mensajes para autoscroll
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Inicializar líneas y plantillas
+  // Inicializar líneas, plantillas y sincronizar contactos reales del dispositivo
   useEffect(() => {
     WhatsAppCloneService.initializeDefaultLines().then((def) => setLines(def));
     WhatsAppCloneService.getTemplates().then((tpls) => setTemplates(tpls));
+    WhatsAppCloneService.purgeCorruptedLidMessages();
 
     const unsubLines = WhatsAppCloneService.subscribeWhatsAppLines((updatedLines) => {
       setLines(updatedLines);
@@ -170,6 +172,17 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
   const activeLine = useMemo(() => {
     return lines.find((l) => l.id === activeLineId) || lines[0] || null;
   }, [lines, activeLineId]);
+
+  // Cargar contactos del dispositivo WhatsApp cuando la línea esté conectada
+  useEffect(() => {
+    if (activeLineId) {
+      WhatsAppCloneService.getLineContacts(activeLineId).then((cts) => {
+        if (cts && Object.keys(cts).length > 0) {
+          setSyncedContacts(cts);
+        }
+      });
+    }
+  }, [activeLineId, activeLine?.estado]);
 
   // Construir Directorio de Contactos unificando entidades del ERP y todos los clientes que escriban
   const contactList = useMemo(() => {
@@ -230,8 +243,26 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     }
 
     // 3. Agregar clientes y prospectos que hayan interactuado por WhatsApp y no estén en ERP
+    const isCorruptedOrRawLid = (ph: string): boolean => {
+      const digits = ph.replace(/\D/g, '');
+      if (digits === '83983891230953' || digits === '25404815458478') return true;
+      if (digits.length >= 13 && !digits.startsWith('58')) return true;
+      return false;
+    };
+
+    const isValidContactName = (name?: string | null): boolean => {
+      if (!name) return false;
+      const trimmed = name.trim();
+      if (!trimmed) return false;
+      if (/^[\.\s\-_]+$/.test(trimmed) || trimmed === '...' || trimmed === '..' || trimmed === '.') return false;
+      if (trimmed.startsWith('+') || /^\d+$/.test(trimmed)) return false;
+      return true;
+    };
+
     for (const [phone, lastMsg] of lastMsgByPhone.entries()) {
       if (seenPhones.has(phone)) continue;
+      // Descartar LIDs huérfanos o corruptos
+      if (isCorruptedOrRawLid(phone)) continue;
       seenPhones.add(phone);
 
       // Buscar en todos los mensajes de este contacto si existe algún pushName o destinatarioNombre guardado
@@ -241,14 +272,17 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
         return p1 === phone || p2 === phone;
       });
 
+      const syncedEntry = syncedContacts[phone] || syncedContacts[phone.replace(/\D/g, '')];
+      const syncedName = isValidContactName(syncedEntry?.name) ? syncedEntry?.name : undefined;
+
       const pushNameMsg = allMsgsForPhone.find(
-        (m) => m.senderName && m.senderName !== phone && !m.senderName.startsWith('+')
+        (m) => isValidContactName(m.senderName)
       );
       const destNameMsg = allMsgsForPhone.find(
-        (m) => (m as any).destinatarioNombre && (m as any).destinatarioNombre !== phone && !(m as any).destinatarioNombre.startsWith('+')
+        (m) => isValidContactName((m as any).destinatarioNombre)
       );
 
-      const cleanSender = pushNameMsg?.senderName || (destNameMsg as any)?.destinatarioNombre;
+      const cleanSender = syncedName || pushNameMsg?.senderName || (destNameMsg as any)?.destinatarioNombre;
       const displayName = cleanSender || `Prospecto (${phone})`;
 
       list.push({
@@ -273,7 +307,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     });
 
     return list;
-  }, [entities, invoices, lineMessages]);
+  }, [entities, invoices, lineMessages, syncedContacts]);
 
   // Filtrado de contactos
   const filteredContacts = useMemo(() => {
@@ -1396,6 +1430,205 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                   <p className="text-[11px] text-slate-400 line-clamp-2">{tpl.textoPlantilla}</p>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 3: Alta Rápida de Lead en Agenda CRM */}
+      {showAddLeadModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 max-w-lg w-full shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <UserPlus className="w-4 h-4 text-emerald-400" />
+                <span>Agregar Prospecto a Agenda CRM / ERP</span>
+              </h3>
+              <button
+                onClick={() => setShowAddLeadModal(false)}
+                className="text-slate-400 hover:text-white transition cursor-pointer p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300">
+              Vincule este número de WhatsApp con un registro oficial en el directorio de clientes y proveedores del ERP.
+            </p>
+
+            {leadModalError && (
+              <div className="p-2.5 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-300">
+                {leadModalError}
+              </div>
+            )}
+
+            <form onSubmit={handleSaveLeadAsClient} className="space-y-3">
+              <div>
+                <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                  Nombre Completo o Razón Social *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newLeadForm.name}
+                  onChange={(e) => setNewLeadForm({ ...newLeadForm, name: e.target.value })}
+                  placeholder="Ej. Inversiones El Llano C.A. o Juan Pérez"
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 min-h-[44px]"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                    RIF o Cédula *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={newLeadForm.rifCedula}
+                    onChange={(e) => setNewLeadForm({ ...newLeadForm, rifCedula: e.target.value.toUpperCase() })}
+                    placeholder="V-12345678 o J-12345678-0"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500 min-h-[44px]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                    Rol Comercial
+                  </label>
+                  <select
+                    value={newLeadForm.role}
+                    onChange={(e) => setNewLeadForm({ ...newLeadForm, role: e.target.value as DualEntityRole })}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white focus:outline-hidden focus:border-emerald-500 min-h-[44px]"
+                  >
+                    <option value="CLIENTE">Cliente (Cuentas por Cobrar)</option>
+                    <option value="PROVEEDOR">Proveedor (BRM / Pagos)</option>
+                    <option value="DUAL">Dual (Cliente y Proveedor)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                  Teléfono Vinculado (E.164)
+                </label>
+                <input
+                  type="text"
+                  disabled
+                  value={selectedContactPhone}
+                  className="w-full px-3 py-2 bg-slate-950/60 border border-slate-800 rounded-xl text-xs text-slate-400 font-mono cursor-not-allowed min-h-[44px]"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                    Ciudad / Estado
+                  </label>
+                  <input
+                    type="text"
+                    value={newLeadForm.city}
+                    onChange={(e) => setNewLeadForm({ ...newLeadForm, city: e.target.value })}
+                    placeholder="San Fernando de Apure"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white focus:outline-hidden focus:border-emerald-500 min-h-[44px]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] font-bold text-slate-300 block mb-1">
+                    Límite de Crédito ($ USD)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={newLeadForm.creditLimitUSD}
+                    onChange={(e) => setNewLeadForm({ ...newLeadForm, creditLimitUSD: parseFloat(e.target.value) || 0 })}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-xl text-xs text-white focus:outline-hidden focus:border-emerald-500 min-h-[44px]"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setShowAddLeadModal(false)}
+                  className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer min-h-[44px]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingLead}
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer shadow-lg shadow-emerald-900/30 min-h-[44px] flex items-center gap-2 disabled:opacity-50"
+                >
+                  {isSavingLead ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Registrando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <UserPlus className="w-4 h-4" />
+                      <span>Guardar en Agenda CRM</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 4: Confirmación de Eliminación de Chat e Historial */}
+      {showDeleteChatConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-slate-900 border border-rose-900/50 rounded-3xl p-6 max-w-md w-full shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+              <h3 className="text-sm font-bold text-rose-400 flex items-center gap-2">
+                <Trash2 className="w-4 h-4 text-rose-500" />
+                <span>Eliminar Chat e Historial</span>
+              </h3>
+              <button
+                onClick={() => setShowDeleteChatConfirm(false)}
+                className="text-slate-400 hover:text-white transition cursor-pointer p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              ¿Está seguro de que desea eliminar permanentemente la conversación con{' '}
+              <strong className="text-white">{selectedContact?.nombreDisplay}</strong> ({selectedContactPhone})?
+            </p>
+            <div className="p-3 bg-rose-950/40 border border-rose-500/30 rounded-xl text-[11px] text-rose-300 leading-relaxed">
+              Esta acción purgará los mensajes tanto en la base de datos de Cloud Firestore como en el historial del dispositivo WhatsApp vinculado. No se puede deshacer.
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setShowDeleteChatConfirm(false)}
+                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer min-h-[44px]"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteChat}
+                disabled={isDeletingChat}
+                className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition cursor-pointer shadow-lg shadow-rose-900/30 min-h-[44px] flex items-center gap-2 disabled:opacity-50"
+              >
+                {isDeletingChat ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Eliminando...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-4 h-4" />
+                    <span>Sí, Eliminar Definitivamente</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

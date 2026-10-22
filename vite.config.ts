@@ -16,6 +16,7 @@ import {
   deleteWhatsAppChatHandler,
   analyzeReceiptOcrHandler,
   verifyAuthToken,
+  getLineContactsHandler,
 } from './server/whatsappQrBridge';
 
 function bcvServerProxyPlugin(): Plugin {
@@ -384,6 +385,15 @@ function bcvServerProxyPlugin(): Plugin {
         const result = await confirmPairingHandler(lineaId);
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true, ...result }));
+      });
+
+      server.middlewares.use('/api/whatsapp/contacts', async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        const reqUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost:3000'}`);
+        const lineaId = reqUrl.searchParams.get('lineaId') || 'linea_cobranzas';
+        const contacts = getLineContactsHandler(lineaId);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: true, contacts }));
       });
     },
   };

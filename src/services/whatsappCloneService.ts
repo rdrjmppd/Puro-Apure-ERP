@@ -26,6 +26,7 @@ import {
   WhatsAppChatContact,
 } from '../types/crmWhatsapp';
 import { DualEntity } from '../types/finance';
+import { sanitizeFirestorePayload } from '../utils/sanitizeFirestorePayload';
 
 const LINES_COLLECTION = 'whatsapp_lineas';
 const MESSAGES_COLLECTION = 'whatsapp_mensajes';
@@ -401,7 +402,61 @@ export class WhatsAppCloneService {
   }
 
   /**
-   * Envía un mensaje en el Clon de WhatsApp Web con autorización Bearer
+   * Consulta los contactos sincronizados de la agenda del teléfono vinculado
+   */
+  static async getLineContacts(lineaId: string): Promise<Record<string, { id: string; name?: string; phone?: string }>> {
+    try {
+      const res = await fetch(`/api/whatsapp/contacts?lineaId=${lineaId}`, {
+        cache: 'no-store',
+      }).then((r) => r.json());
+      return res?.contacts || {};
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Depuración DevSecOps: Pone en cuarentena y elimina documentos antiguos con LIDs corruptos (ej. +83983891230953, +25404815458478)
+   */
+  static async purgeCorruptedLidMessages(lineaId?: string): Promise<number> {
+    try {
+      const q = lineaId
+        ? query(collection(db, MESSAGES_COLLECTION), where('lineaId', '==', lineaId), limit(500))
+        : query(collection(db, MESSAGES_COLLECTION), limit(500));
+      const snap = await getDocs(q);
+      const batch = writeBatch(db);
+      let count = 0;
+
+      const isCorruptedLid = (phone?: string) => {
+        if (!phone) return false;
+        const digits = phone.replace(/\D/g, '');
+        // LIDs huérfanos típicos de Baileys que no son números E.164 venezolanos (58) ni números internacionales válidos
+        if (digits === '83983891230953' || digits === '25404815458478') return true;
+        if (digits.length >= 13 && !digits.startsWith('58') && !phone.includes('@')) return true;
+        return false;
+      };
+
+      snap.forEach((d) => {
+        const m = d.data() as WhatsAppMessage;
+        if (isCorruptedLid(m.remitenteTelefono) || isCorruptedLid(m.destinatarioTelefono)) {
+          batch.delete(d.ref);
+          count++;
+        }
+      });
+
+      if (count > 0) {
+        await batch.commit();
+        console.log(`[WhatsAppCloneService] Purga completada: ${count} mensajes con LIDs corruptos eliminados.`);
+      }
+      return count;
+    } catch (err) {
+      console.warn('[WhatsAppCloneService] Aviso al depurar LIDs corruptos:', err);
+      return 0;
+    }
+  }
+
+  /**
+   * Envía un mensaje en el Clon de WhatsApp Web con autorización Bearer y validación auténtica de socket
    */
   static async sendWhatsAppMessage(
     lineaId: string,
@@ -418,7 +473,7 @@ export class WhatsAppCloneService {
     const destNorm = normalizeToE164(destinatarioTelefono);
     const remNorm = normalizeToE164(remitenteTelefono);
 
-    const message: WhatsAppMessage & { destinatarioNombre?: string } = {
+    const message: WhatsAppMessage & { destinatarioNombre?: string; errorDetalle?: string } = {
       id: msgId,
       whatsappMessageId: msgId,
       lineaId,
@@ -441,45 +496,80 @@ export class WhatsAppCloneService {
       message.mediaMimeType = mediaMimeType;
     }
 
-    // Sanitización DevSecOps estricta: eliminar cualquier campo undefined antes de persistir en Firestore
-    const cleanMessage = Object.fromEntries(
-      Object.entries(message).filter(([_, v]) => v !== undefined)
-    ) as WhatsAppMessage;
+    const cleanMessage = sanitizeFirestorePayload(message);
 
     try {
-      // Entrega a través de la pasarela de servidor con autorización
+      let serverRes: { success: boolean; messageId?: string; error?: string } = {
+        success: false,
+        error: 'Línea desconectada',
+      };
+
+      // Entrega real a través de la pasarela de servidor con autorización
       if (typeof window !== 'undefined') {
         const currentUser = auth.currentUser;
         const token = currentUser ? await currentUser.getIdToken() : '';
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (token) headers['Authorization'] = `Bearer ${token}`;
 
-        fetch('/api/whatsapp/send', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            lineaId,
-            toPhone: destNorm,
-            text: texto,
-            mediaDataUrl: mediaUrl || undefined,
-            clientMsgId: msgId,
-            destinatarioNombre: destinatarioNombre || undefined,
-          }),
-        }).catch(() => {});
+        try {
+          const fetchRes = await fetch('/api/whatsapp/send', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              lineaId,
+              toPhone: destNorm,
+              text: texto,
+              mediaDataUrl: mediaUrl || undefined,
+              clientMsgId: msgId,
+              destinatarioNombre: destinatarioNombre || undefined,
+            }),
+          });
+          serverRes = await fetchRes.json();
+        } catch (fetchErr: any) {
+          serverRes = {
+            success: false,
+            error: fetchErr.message || 'Error de conexión con la pasarela de WhatsApp',
+          };
+        }
       }
 
       const docRef = doc(db, MESSAGES_COLLECTION, msgId);
+
+      // Si el servidor reporta error o desconexión, marcar como FALLIDO (prohibido fingir éxito)
+      if (!serverRes.success) {
+        const failedMessage: WhatsAppMessage = {
+          ...cleanMessage,
+          estado: 'FALLIDO',
+          errorDetalle: serverRes.error || 'Fallo de entrega en socket de WhatsApp',
+        };
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          await offlineSyncEngine.enqueueMutation(MESSAGES_COLLECTION, msgId, 'SET', failedMessage, {
+            offline: true,
+          });
+        } else {
+          await setDoc(docRef, sanitizeFirestorePayload(failedMessage));
+        }
+        return {
+          success: false,
+          messageId: msgId,
+          error: serverRes.error || 'No se pudo enviar el mensaje por WhatsApp. Verifique que la línea esté conectada.',
+        };
+      }
+
+      // Entrega exitosa verificada por Baileys
+      const confirmedMessage: WhatsAppMessage = {
+        ...cleanMessage,
+        estado: 'ENVIADO',
+        whatsappMessageId: serverRes.messageId || msgId,
+      };
+
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
-        await offlineSyncEngine.enqueueMutation(MESSAGES_COLLECTION, msgId, 'SET', cleanMessage, {
+        await offlineSyncEngine.enqueueMutation(MESSAGES_COLLECTION, msgId, 'SET', confirmedMessage, {
           offline: true,
         });
       } else {
-        await setDoc(docRef, cleanMessage);
+        await setDoc(docRef, sanitizeFirestorePayload(confirmedMessage));
       }
-
-      setTimeout(() => {
-        updateDoc(docRef, { estado: 'ENTREGADO' }).catch(() => {});
-      }, 800);
 
       return { success: true, messageId: msgId };
     } catch (err: any) {

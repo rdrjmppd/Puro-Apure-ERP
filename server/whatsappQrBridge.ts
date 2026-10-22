@@ -25,6 +25,7 @@ import crypto from 'crypto';
 import zlib from 'zlib';
 import { GoogleGenAI } from '@google/genai';
 import { adminApp, adminAuth, adminDb, FieldValue } from './firebaseAdmin';
+import { sanitizeFirestorePayload } from '../src/utils/sanitizeFirestorePayload';
 
 export interface WhatsAppQrBridgeStatus {
   lineaId: string;
@@ -254,6 +255,117 @@ async function syncLineToFirestore(lineaId: string, status: Record<string, any>)
   }
 }
 
+export interface SyncedContact {
+  id: string;
+  name?: string;
+  notify?: string;
+  verifiedName?: string;
+  phone?: string;
+  lastUpdated: number;
+}
+
+const contactsMemoryCache = new Map<string, Map<string, SyncedContact>>();
+
+function getContactsMapFilePath(lineaId: string): string {
+  const sessionDir = getSessionDir(lineaId);
+  return path.join(sessionDir, 'contacts-map.json');
+}
+
+export function cleanContactDisplayName(name?: string | null): string | undefined {
+  if (!name) return undefined;
+  const trimmed = name.trim();
+  if (!trimmed) return undefined;
+  if (/^[\.\s\-_]+$/.test(trimmed) || trimmed === '...' || trimmed === '..' || trimmed === '.') {
+    return undefined;
+  }
+  if (/^\+?\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+export function loadLineContacts(lineaId: string): Map<string, SyncedContact> {
+  let map = contactsMemoryCache.get(lineaId);
+  if (map) return map;
+
+  map = new Map<string, SyncedContact>();
+  const filePath = getContactsMapFilePath(lineaId);
+  if (fs.existsSync(filePath)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (typeof data === 'object' && data !== null) {
+        for (const [k, v] of Object.entries(data)) {
+          map.set(k, v as SyncedContact);
+        }
+      }
+    } catch (e) {
+      console.warn(`[WhatsApp Bridge] Error leyendo contacts-map.json para ${lineaId}:`, e);
+    }
+  }
+  contactsMemoryCache.set(lineaId, map);
+  return map;
+}
+
+function persistLineContacts(lineaId: string) {
+  const map = contactsMemoryCache.get(lineaId);
+  if (!map) return;
+  const filePath = getContactsMapFilePath(lineaId);
+  try {
+    const obj: Record<string, SyncedContact> = {};
+    for (const [k, v] of map.entries()) {
+      obj[k] = v;
+    }
+    fs.writeFileSync(filePath, JSON.stringify(obj, null, 2), 'utf-8');
+  } catch (e) {
+    console.warn(`[WhatsApp Bridge] Error guardando contacts-map.json para ${lineaId}:`, e);
+  }
+}
+
+export function ingestLineContacts(lineaId: string, contacts: any[]) {
+  if (!Array.isArray(contacts) || contacts.length === 0) return;
+  const map = loadLineContacts(lineaId);
+  let changed = false;
+
+  for (const c of contacts) {
+    if (!c || !c.id) continue;
+    const jid = String(c.id);
+    const rawDigits = jid.split('@')[0].split(':')[0].replace(/[^\d]/g, '');
+    const cleanName = cleanContactDisplayName(c.name) || cleanContactDisplayName(c.notify) || cleanContactDisplayName(c.verifiedName);
+
+    if (cleanName) {
+      const entry: SyncedContact = {
+        id: jid,
+        name: cleanName,
+        notify: cleanContactDisplayName(c.notify),
+        verifiedName: cleanContactDisplayName(c.verifiedName),
+        phone: rawDigits ? `+${rawDigits}` : undefined,
+        lastUpdated: Date.now(),
+      };
+
+      map.set(jid, entry);
+      if (rawDigits) {
+        map.set(rawDigits, entry);
+        map.set(`+${rawDigits}`, entry);
+      }
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    persistLineContacts(lineaId);
+    console.log(`[WhatsApp Bridge] Agenda de ${lineaId} sincronizada: ${map.size} entradas registradas.`);
+  }
+}
+
+export function getLineContactsHandler(lineaId: string): Record<string, SyncedContact> {
+  const map = loadLineContacts(lineaId);
+  const obj: Record<string, SyncedContact> = {};
+  for (const [k, v] of map.entries()) {
+    obj[k] = v;
+  }
+  return obj;
+}
+
 /**
  * Guarda un mensaje entrante o saliente en Firestore
  */
@@ -265,21 +377,23 @@ async function saveMessageToFirestore(messageData: {
   direccion: 'ENTRANTE' | 'SALIENTE';
   texto: string;
   timestamp: number;
-  estado: 'ENVIADO' | 'ENTREGADO' | 'LEIDO';
+  estado: 'ENVIADO' | 'ENTREGADO' | 'LEIDO' | 'FALLIDO';
   tipoMensaje: 'TEXTO' | 'IMAGEN';
   mediaUrl?: string;
   hasComprobantePago?: boolean;
   senderName?: string;
   destinatarioNombre?: string;
   whatsappMessageId?: string;
+  errorDetalle?: string;
 }) {
   try {
     const docRef = adminDb.collection('whatsapp_mensajes').doc(messageData.id);
-    await docRef.set({
+    const payload = sanitizeFirestorePayload({
       ...messageData,
       whatsappMessageId: messageData.whatsappMessageId || messageData.id,
       ocrStatus: messageData.hasComprobantePago ? 'PENDIENTE' : 'NO_ANALIZADO',
-    }, { merge: true });
+    });
+    await docRef.set(payload, { merge: true });
     console.log(`[WhatsApp Bridge] Mensaje ${messageData.id} guardado en Firestore.`);
   } catch (err) {
     console.warn(`[WhatsApp Bridge] No se pudo guardar mensaje en Firestore:`, err);
@@ -527,6 +641,23 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
     }
   });
 
+  // Sincronización de Agenda e Historial de Contactos desde el dispositivo vinculado
+  sock.ev.on('messaging-history.set', async ({ contacts, chats, messages, isLatest }) => {
+    console.log(`[WhatsApp Bridge] Sincronización messaging-history.set para ${lineaId} (isLatest: ${isLatest}): contacts=${contacts?.length || 0}`);
+    if (contacts && contacts.length > 0) {
+      ingestLineContacts(lineaId, contacts);
+    }
+  });
+
+  sock.ev.on('contacts.upsert', async (contacts) => {
+    console.log(`[WhatsApp Bridge] Sincronización contacts.upsert para ${lineaId}: ${contacts.length} contactos.`);
+    ingestLineContacts(lineaId, contacts);
+  });
+
+  sock.ev.on('contacts.update', async (updates) => {
+    ingestLineContacts(lineaId, updates as any);
+  });
+
   // Escuchar mensajes entrantes en tiempo real con soporte @s.whatsapp.net y @lid
   sock.ev.on('messages.upsert', async ({ messages: newMessages, type }) => {
     if (type !== 'notify' && type !== 'append') return;
@@ -545,6 +676,11 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
       const myPhone = myPhoneDigits ? `+${myPhoneDigits}` : undefined;
 
       if (!senderPhone) continue;
+
+      // Extraer nombre de remitente saneado desde la agenda local o pushName (prohibido "..." o vacíos)
+      const contactsMap = loadLineContacts(lineaId);
+      const contactEntry = contactsMap.get(senderPhone) || contactsMap.get(senderPhone.replace(/[^\d]/g, '')) || contactsMap.get(remoteJid);
+      const cleanSender = cleanContactDisplayName(contactEntry?.name) || cleanContactDisplayName(msg.pushName);
 
       let textContent =
         msg.message.conversation ||
@@ -593,7 +729,7 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
         tipoMensaje: isImage ? 'IMAGEN' : 'TEXTO',
         mediaUrl,
         hasComprobantePago: isImage,
-        senderName: msg.pushName || undefined,
+        senderName: cleanSender || undefined,
       });
 
       // Si es imagen entrante, crear registro en bandeja de pre-conciliación OCR sin alterar libro mayor
@@ -710,8 +846,11 @@ export async function sendWhatsAppMessageHandler(
   destinatarioNombre?: string
 ): Promise<{ success: boolean; messageId?: string; error?: string }> {
   const sock = activeSockets.get(lineaId);
-  if (!sock) {
-    return { success: false, error: `La línea ${lineaId} no está conectada activamente a WhatsApp.` };
+  const lineState = activeLinesState.get(lineaId);
+
+  if (!sock || lineState?.estado !== 'CONECTADO') {
+    const errorMsg = `La línea ${lineaId} no está conectada activamente a WhatsApp (Estado: ${lineState?.estado || 'DESCONECTADO'}). Escanee el código QR para vincular su cuenta.`;
+    return { success: false, error: errorMsg };
   }
 
   try {
@@ -753,7 +892,7 @@ export async function sendWhatsAppMessageHandler(
       sentMsg = await sock.sendMessage(jid, { text });
     }
 
-    const messageId = sentMsg?.key.id || `msg_${Date.now()}`;
+    const messageId = sentMsg?.key?.id || `msg_${Date.now()}`;
     const rawUser = sock.user?.id || '';
     const myPhoneDigits = rawUser.split(':')[0].split('@')[0].replace(/[^\d]/g, '');
     const myPhone = myPhoneDigits ? `+${myPhoneDigits}` : '+580000000000';
@@ -771,13 +910,33 @@ export async function sendWhatsAppMessageHandler(
       tipoMensaje: mediaDataUrl ? 'IMAGEN' : 'TEXTO',
       mediaUrl: mediaDataUrl,
       whatsappMessageId: sentMsg?.key?.id,
-      destinatarioNombre: destinatarioNombre || undefined,
+      destinatarioNombre: cleanContactDisplayName(destinatarioNombre),
     });
 
     return { success: true, messageId };
   } catch (err: any) {
     console.error('[WhatsApp Bridge] Error al enviar mensaje:', err);
-    return { success: false, error: err.message };
+    if (clientMsgId) {
+      const rawUser = sock?.user?.id || '';
+      const myPhoneDigits = rawUser.split(':')[0].split('@')[0].replace(/[^\d]/g, '');
+      const myPhone = myPhoneDigits ? `+${myPhoneDigits}` : '+580000000000';
+      const cleanDigits = toPhone.replace(/[^\d]/g, '');
+      await saveMessageToFirestore({
+        id: clientMsgId,
+        lineaId,
+        remitenteTelefono: myPhone,
+        destinatarioTelefono: toPhone.startsWith('+') ? toPhone : `+${cleanDigits}`,
+        direccion: 'SALIENTE',
+        texto: text,
+        timestamp: Date.now(),
+        estado: 'FALLIDO',
+        tipoMensaje: mediaDataUrl ? 'IMAGEN' : 'TEXTO',
+        mediaUrl: mediaDataUrl,
+        destinatarioNombre: cleanContactDisplayName(destinatarioNombre),
+        errorDetalle: err.message,
+      });
+    }
+    return { success: false, error: err.message || 'Error al enviar por socket de WhatsApp' };
   }
 }
 
@@ -983,15 +1142,21 @@ export async function analyzeReceiptOcrHandler(
   base64Clean: string,
   mimeType: string = 'image/jpeg'
 ): Promise<{ success: boolean; data?: any; error?: string }> {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
-  if (!apiKey || apiKey.startsWith('AQ.')) {
+  const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
+  if (!apiKey || apiKey.length < 20) {
     return {
       success: false,
-      error: 'API Key de Gemini no configurada en el servidor.',
+      error: 'API Key de Gemini no configurada o incompleta en el servidor.',
     };
   }
 
-  const candidateModels = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+  const candidateModels = [
+    'gemini-2.5-flash',
+    'gemini-3.8-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash',
+  ];
   for (const model of candidateModels) {
     try {
       const ai = new GoogleGenAI({ apiKey });
@@ -1056,7 +1221,7 @@ IMPORTANTE: Si el monto está en formato venezolano con punto de miles y coma de
           analisisVisualDetalle: parsed.analisisVisualDetalle || `Comprobante analizado con ${model}.`,
         },
       };
-    } catch (err) {
+    } catch (err: any) {
       console.warn(`[OCR Backend] Error con modelo ${model}:`, err.message);
     }
   }

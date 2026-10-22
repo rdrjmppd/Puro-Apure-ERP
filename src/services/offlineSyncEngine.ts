@@ -15,6 +15,7 @@ import {
   increment,
 } from 'firebase/firestore';
 import { db } from '../firebase/config';
+import { sanitizeFirestorePayload } from '../utils/sanitizeFirestorePayload';
 
 export interface QueuedMutation {
   id: string;
@@ -335,8 +336,9 @@ class OfflineSyncEngine {
     payload: DocumentData,
     metadata?: Record<string, unknown>
   ): Promise<string> {
+    const cleanPayload = sanitizeFirestorePayload(payload);
     const db = await this.initIndexedDb();
-    const { compressed, rawSize, compressedSize } = this.compress(payload);
+    const { compressed, rawSize, compressedSize } = this.compress(cleanPayload);
 
     const mutation: QueuedMutation = {
       id: `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
@@ -359,7 +361,7 @@ class OfflineSyncEngine {
       if (action !== 'DELETE') {
         tx.objectStore(CACHE_STORE).put({
           key: `${collectionName}/${docId}`,
-          data: payload,
+          data: cleanPayload,
           updatedAt: Date.now(),
         });
       } else {
@@ -487,15 +489,16 @@ class OfflineSyncEngine {
             const decompressedData = this.decompress<DocumentData>(item.compressedPayload);
 
             // Soporte nativo para deltas atómicos de Firestore (increment)
-            const dataToWrite: DocumentData = { ...decompressedData };
-            if (dataToWrite._increments && typeof dataToWrite._increments === 'object') {
-              for (const [k, v] of Object.entries(dataToWrite._increments)) {
+            const rawDecompressed = { ...decompressedData };
+            if (rawDecompressed._increments && typeof rawDecompressed._increments === 'object') {
+              for (const [k, v] of Object.entries(rawDecompressed._increments)) {
                 if (typeof v === 'number') {
-                  dataToWrite[k] = increment(v);
+                  rawDecompressed[k] = increment(v);
                 }
               }
-              delete dataToWrite._increments;
+              delete rawDecompressed._increments;
             }
+            const dataToWrite: DocumentData = sanitizeFirestorePayload(rawDecompressed);
 
             if (item.action === 'SET') {
               fbBatch.set(docRef, {

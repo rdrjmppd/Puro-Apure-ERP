@@ -727,6 +727,12 @@ export const Dashboard: React.FC = () => {
                   setCrmOcrModalOpen(true);
                 }}
                 onNavigateToFinance={() => setActiveModule('FINANZAS')}
+                onEntityCreated={(newEntity) => {
+                  setCrmEntities((prev) => {
+                    const exists = prev.some((e) => e.id === newEntity.id);
+                    return exists ? prev.map((e) => (e.id === newEntity.id ? newEntity : e)) : [...prev, newEntity];
+                  });
+                }}
               />
             </React.Suspense>
           </AuthGuard>

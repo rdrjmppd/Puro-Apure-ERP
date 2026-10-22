@@ -45,6 +45,8 @@ export interface WhatsAppMessage {
   ocrStatus?: 'NO_ANALIZADO' | 'PENDIENTE' | 'ANALIZADO';
   ocrPagoId?: string;
   senderName?: string;
+  destinatarioNombre?: string;
+  errorDetalle?: string;
 }
 
 export type WhatsAppTemplateCategory =
