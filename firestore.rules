@@ -359,6 +359,17 @@ service cloud.firestore {
       allow delete: if isSuperAdmin();
     }
 
+    match /whatsapp_sesiones/{sesionId} {
+      allow read, write: if isSignedIn() && isAdmin();
+      allow delete: if isSignedIn() && isAdmin();
+    }
+
+    match /whatsapp_auditoria/{auditId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow delete: if isSuperAdmin();
+    }
+
     // ==========================================
     // 11. OCR Smart Reading & Reported Payments (@OCR / @Finanzas)
     // ==========================================

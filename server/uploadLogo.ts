@@ -8,7 +8,7 @@
  *  - El servidor NO escribe archivos en disco (src/, public/, dist/) en tiempo de ejecución.
  *  - Cada escritura incrementa `version` para invalidar cachés de cliente de forma determinista.
  */
-import admin from './firebaseAdmin';
+import admin, { hasAdminCredentials } from './firebaseAdmin';
 
 export const OFFICIAL_LOGO_PATH = '/puro_apure_logo.png';
 const ROOT_SUPERADMIN_EMAIL = 'rdrj.mppd@gmail.com';
@@ -50,6 +50,9 @@ export function isAllowedLogoUrl(url: unknown): url is string {
 async function verifySuperAdmin(
   authHeader?: string
 ): Promise<{ ok: true; uid: string; email: string } | { ok: false; status: number; error: string }> {
+  if (!hasAdminCredentials) {
+    return { ok: false, status: 503, error: 'CREDENTIALS_UNAVAILABLE: Operación administrativa no disponible en este entorno.' };
+  }
   const match = /^Bearer\s+(.+)$/i.exec(authHeader || '');
   if (!match) {
     return { ok: false, status: 401, error: 'AUTENTICACION_REQUERIDA: Inicie sesión como Superadministrador.' };
@@ -164,6 +167,9 @@ export async function getBrandingHandler(): Promise<{
   version: number;
   systemName?: string;
 }> {
+  if (!hasAdminCredentials) {
+    return { success: true, logoUrl: OFFICIAL_LOGO_PATH, isCustom: false, version: 0, systemName: 'Puro Apure ERP' };
+  }
   try {
     const snap = await admin.firestore().collection('system_config').doc('branding').get();
     const data = snap.exists ? snap.data() : undefined;
@@ -176,8 +182,10 @@ export async function getBrandingHandler(): Promise<{
         systemName: data.systemName || 'Puro Apure ERP',
       };
     }
-  } catch (err) {
-    console.warn('[getBrandingHandler] Error leyendo branding de Firestore:', err);
+  } catch (err: any) {
+    if (!(err?.code === 7 || err?.message?.includes('PERMISSION_DENIED') || err?.message?.includes('insufficient permissions'))) {
+      console.warn('[getBrandingHandler] Error leyendo branding de Firestore:', err);
+    }
   }
   return { success: true, logoUrl: OFFICIAL_LOGO_PATH, isCustom: false, version: 0, systemName: 'Puro Apure ERP' };
 }
@@ -207,6 +215,11 @@ async function writeOfficialBranding(source: string, version: number, uid = 'sys
  * - Documento ya migrado (schema vigente y URL válida) → no se toca (respeta logos personalizados legítimos).
  */
 export async function ensureBrandingIntegrity(): Promise<void> {
+  if (!hasAdminCredentials) {
+    // Sin credenciales administrativas en el servidor local.
+    // La integridad del branding es gestionada por el cliente Web SDK autenticado con reglas de seguridad.
+    return;
+  }
   try {
     const db = admin.firestore();
     const docRef = db.collection('system_config').doc('branding');
@@ -232,7 +245,10 @@ export async function ensureBrandingIntegrity(): Promise<void> {
     });
     await writeOfficialBranding('integrity-migration', Date.now());
     console.log(`[Branding] Documento heredado respaldado en system_config/${backupId}; logotipo oficial restaurado.`);
-  } catch (err) {
+  } catch (err: any) {
+    if (err?.code === 7 || err?.message?.includes('PERMISSION_DENIED') || err?.message?.includes('insufficient permissions')) {
+      return;
+    }
     console.warn('[Branding] Aviso en verificación de integridad de marca:', err);
   }
 }

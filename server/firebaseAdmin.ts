@@ -19,6 +19,25 @@ try {
   console.warn('[Firebase Admin] Advertencia al leer serviceAccountKey.json:', err);
 }
 
+// Bandera DevSecOps: Determina si el entorno cuenta con credenciales administrativas para llamadas gRPC
+export const hasAdminCredentials = Boolean(
+  serviceAccount || process.env.GOOGLE_APPLICATION_CREDENTIALS
+);
+
+let configJson: any = null;
+try {
+  const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+  if (fs.existsSync(configPath)) {
+    configJson = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  }
+} catch {}
+
+const targetProjectId =
+  serviceAccount?.project_id ||
+  process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ||
+  configJson?.projectId ||
+  'puro-apure-erp';
+
 export const adminApp =
   getApps().length > 0
     ? getApp()
@@ -26,15 +45,23 @@ export const adminApp =
         serviceAccount
           ? {
               credential: cert(serviceAccount),
-              projectId: serviceAccount.project_id || 'puro-apure-erp',
+              projectId: targetProjectId,
             }
           : {
-              projectId: 'puro-apure-erp',
+              projectId: targetProjectId,
             }
       );
 
 export const adminAuth = getAuth(adminApp);
-export const adminDb = getFirestore(adminApp);
+
+const targetDbId =
+  process.env.NEXT_PUBLIC_FIREBASE_FIRESTORE_DATABASE_ID ||
+  configJson?.firestoreDatabaseId;
+
+export const adminDb =
+  targetDbId && targetDbId !== '(default)'
+    ? getFirestore(adminApp, targetDbId)
+    : getFirestore(adminApp);
 
 // Configuración DevSecOps: ignorar propiedades undefined en escrituras del servidor
 adminDb.settings({ ignoreUndefinedProperties: true });

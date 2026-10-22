@@ -4,7 +4,7 @@
  * y persistencia física canónica directa en Firestore Backend.
  */
 
-import admin from './firebaseAdmin';
+import admin, { hasAdminCredentials } from './firebaseAdmin';
 import firebaseAppletConfig from '../firebase-applet-config.json';
 
 export interface CreateUserRequest {
@@ -41,6 +41,13 @@ export async function createUserAccountHandler(
   authHeader?: string
 ): Promise<CreateUserResponse> {
   const { email, password, displayName, role, callerRole, callerEmail } = reqBody;
+
+  if (!hasAdminCredentials) {
+    return {
+      success: false,
+      error: 'CREDENTIALS_UNAVAILABLE: Operación administrativa no disponible en este entorno sin serviceAccountKey.',
+    };
+  }
 
   // 1. Verificación de Autoridad: Solo el SUPERADMIN puede crear usuarios
   const isAuthorized =
@@ -144,6 +151,9 @@ export async function createUserAccountHandler(
 }
 
 export async function listUsersHandler(): Promise<{ success: boolean; users: any[]; error?: string }> {
+  if (!hasAdminCredentials) {
+    return { success: true, users: [] };
+  }
   try {
     // SSoT Primario: Cuentas reales creadas físicamente en Firebase Authentication
     const authResult = await admin.auth().listUsers(100);

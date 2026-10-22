@@ -24,7 +24,7 @@ import path from 'path';
 import crypto from 'crypto';
 import zlib from 'zlib';
 import { GoogleGenAI } from '@google/genai';
-import { adminApp, adminAuth, adminDb, FieldValue } from './firebaseAdmin';
+import { adminApp, adminAuth, adminDb, FieldValue, hasAdminCredentials } from './firebaseAdmin';
 import { sanitizeFirestorePayload } from '../src/utils/sanitizeFirestorePayload';
 
 export interface WhatsAppQrBridgeStatus {
@@ -106,6 +106,9 @@ function getSessionDir(lineaId: string): string {
  * Opción A: Restaura los archivos de sesión desde Firestore a disco si la carpeta local está vacía
  */
 async function restoreSessionFromFirestore(lineaId: string, sessionDir: string): Promise<boolean> {
+  if (!hasAdminCredentials) {
+    return false;
+  }
   try {
     const docRef = adminDb.collection('whatsapp_sesiones').doc(lineaId);
     const snap = await docRef.get();
@@ -130,8 +133,10 @@ async function restoreSessionFromFirestore(lineaId: string, sessionDir: string):
       `[WhatsApp Bridge] Sesión de ${lineaId} restaurada exitosamente desde Firestore (${fileKeys.length} archivos).`
     );
     return true;
-  } catch (err) {
-    console.warn(`[WhatsApp Bridge] Aviso al restaurar sesión de Firestore para ${lineaId}:`, err);
+  } catch (err: any) {
+    if (!err?.message?.includes('PERMISSION_DENIED') && err?.code !== 7) {
+      console.warn(`[WhatsApp Bridge] Aviso al restaurar sesión de Firestore para ${lineaId}:`, err);
+    }
     return false;
   }
 }
@@ -140,6 +145,9 @@ async function restoreSessionFromFirestore(lineaId: string, sessionDir: string):
  * Opción A: Resguarda los archivos de sesión cifrados en Firestore
  */
 async function persistSessionToFirestore(lineaId: string, sessionDir: string): Promise<void> {
+  if (!hasAdminCredentials) {
+    return;
+  }
   try {
     if (!fs.existsSync(sessionDir)) return;
     const fileNames = fs.readdirSync(sessionDir);
@@ -190,8 +198,10 @@ async function persistSessionToFirestore(lineaId: string, sessionDir: string): P
       { merge: true }
     );
     console.log(`[WhatsApp Bridge] Sesión de ${lineaId} resguardada exitosamente en Firestore (${encrypted.encrypted.length} caracteres hex).`);
-  } catch (err) {
-    console.warn(`[WhatsApp Bridge] Aviso al resguardar sesión en Firestore para ${lineaId}:`, err);
+  } catch (err: any) {
+    if (!err?.message?.includes('PERMISSION_DENIED') && err?.code !== 7) {
+      console.warn(`[WhatsApp Bridge] Aviso al resguardar sesión en Firestore para ${lineaId}:`, err);
+    }
   }
 }
 
@@ -199,11 +209,16 @@ async function persistSessionToFirestore(lineaId: string, sessionDir: string): P
  * Opción A: Elimina la sesión resguardada en Firestore al desvincular
  */
 async function deleteSessionFromFirestore(lineaId: string): Promise<void> {
+  if (!hasAdminCredentials) {
+    return;
+  }
   try {
     await adminDb.collection('whatsapp_sesiones').doc(lineaId).delete();
     console.log(`[WhatsApp Bridge] Sesión en Firestore eliminada para ${lineaId}.`);
-  } catch (err) {
-    console.warn(`[WhatsApp Bridge] Error al eliminar sesión de Firestore para ${lineaId}:`, err);
+  } catch (err: any) {
+    if (!err?.message?.includes('PERMISSION_DENIED') && err?.code !== 7) {
+      console.warn(`[WhatsApp Bridge] Error al eliminar sesión de Firestore para ${lineaId}:`, err);
+    }
   }
 }
 
@@ -220,6 +235,10 @@ async function logWhatsAppAudit(entry: {
   timestamp: number;
   detalles: string;
 }) {
+  if (!hasAdminCredentials) {
+    console.debug('[WhatsApp Bridge] Auditoría en memoria:', entry);
+    return;
+  }
   try {
     await adminDb.collection('whatsapp_auditoria').add({
       ...entry,
@@ -240,6 +259,9 @@ const DEFAULT_BRIDGE_LINE_NAMES: Record<string, string> = {
  * Sincroniza el estado de la línea con Firestore para que el frontend lo lea en tiempo real
  */
 async function syncLineToFirestore(lineaId: string, status: Record<string, any>) {
+  if (!hasAdminCredentials) {
+    return;
+  }
   try {
     const docRef = adminDb.collection('whatsapp_lineas').doc(lineaId);
     await docRef.set(
@@ -250,8 +272,10 @@ async function syncLineToFirestore(lineaId: string, status: Record<string, any>)
       },
       { merge: true }
     );
-  } catch (err) {
-    console.debug(`[WhatsApp Bridge] Sincronización Firestore en memoria para ${lineaId}`);
+  } catch (err: any) {
+    if (!err?.message?.includes('PERMISSION_DENIED') && err?.code !== 7) {
+      console.debug(`[WhatsApp Bridge] Sincronización Firestore en memoria para ${lineaId}`);
+    }
   }
 }
 
@@ -386,6 +410,9 @@ async function saveMessageToFirestore(messageData: {
   whatsappMessageId?: string;
   errorDetalle?: string;
 }) {
+  if (!hasAdminCredentials) {
+    return;
+  }
   try {
     const docRef = adminDb.collection('whatsapp_mensajes').doc(messageData.id);
     const payload = sanitizeFirestorePayload({
@@ -395,8 +422,10 @@ async function saveMessageToFirestore(messageData: {
     });
     await docRef.set(payload, { merge: true });
     console.log(`[WhatsApp Bridge] Mensaje ${messageData.id} guardado en Firestore.`);
-  } catch (err) {
-    console.warn(`[WhatsApp Bridge] No se pudo guardar mensaje en Firestore:`, err);
+  } catch (err: any) {
+    if (!err?.message?.includes('PERMISSION_DENIED') && err?.code !== 7) {
+      console.warn(`[WhatsApp Bridge] No se pudo guardar mensaje en Firestore:`, err);
+    }
   }
 }
 
@@ -981,45 +1010,49 @@ export async function disconnectWhatsAppLineHandler(lineaId: string): Promise<{ 
   });
 
   // Purga automática DevSecOps: eliminar mensajes de Leads no registrados al desvincular
-  try {
-    const entitiesSnap = await adminDb.collection('dual_entities').get();
-    const registeredPhoneDigits = new Set<string>();
-    entitiesSnap.forEach((d) => {
-      const data = d.data();
-      const p1 = (data.phone || '').replace(/\D/g, '');
-      const p2 = (data.telefonoContacto || '').replace(/\D/g, '');
-      if (p1.length >= 7) registeredPhoneDigits.add(p1.slice(-10));
-      if (p2.length >= 7) registeredPhoneDigits.add(p2.slice(-10));
-    });
+  if (hasAdminCredentials) {
+    try {
+      const entitiesSnap = await adminDb.collection('dual_entities').get();
+      const registeredPhoneDigits = new Set<string>();
+      entitiesSnap.forEach((d) => {
+        const data = d.data();
+        const p1 = (data.phone || '').replace(/\D/g, '');
+        const p2 = (data.telefonoContacto || '').replace(/\D/g, '');
+        if (p1.length >= 7) registeredPhoneDigits.add(p1.slice(-10));
+        if (p2.length >= 7) registeredPhoneDigits.add(p2.slice(-10));
+      });
 
-    const messagesSnap = await adminDb
-      .collection('whatsapp_mensajes')
-      .where('lineaId', '==', lineaId)
-      .get();
+      const messagesSnap = await adminDb
+        .collection('whatsapp_mensajes')
+        .where('lineaId', '==', lineaId)
+        .get();
 
-    const batch = adminDb.batch();
-    let purgedCount = 0;
+      const batch = adminDb.batch();
+      let purgedCount = 0;
 
-    messagesSnap.forEach((doc) => {
-      const msg = doc.data();
-      const remDigits = (msg.remitenteTelefono || '').replace(/\D/g, '').slice(-10);
-      const destDigits = (msg.destinatarioTelefono || '').replace(/\D/g, '').slice(-10);
+      messagesSnap.forEach((doc) => {
+        const msg = doc.data();
+        const remDigits = (msg.remitenteTelefono || '').replace(/\D/g, '').slice(-10);
+        const destDigits = (msg.destinatarioTelefono || '').replace(/\D/g, '').slice(-10);
 
-      const isRemRegistered = remDigits && registeredPhoneDigits.has(remDigits);
-      const isDestRegistered = destDigits && registeredPhoneDigits.has(destDigits);
+        const isRemRegistered = remDigits && registeredPhoneDigits.has(remDigits);
+        const isDestRegistered = destDigits && registeredPhoneDigits.has(destDigits);
 
-      if (!isRemRegistered && !isDestRegistered) {
-        batch.delete(doc.ref);
-        purgedCount++;
+        if (!isRemRegistered && !isDestRegistered) {
+          batch.delete(doc.ref);
+          purgedCount++;
+        }
+      });
+
+      if (purgedCount > 0) {
+        await batch.commit();
+        console.log(`[WhatsApp Bridge] Purga DevSecOps: ${purgedCount} mensajes de Leads eliminados tras desvincular.`);
       }
-    });
-
-    if (purgedCount > 0) {
-      await batch.commit();
-      console.log(`[WhatsApp Bridge] Purga DevSecOps: ${purgedCount} mensajes de Leads eliminados tras desvincular.`);
+    } catch (purgeErr: any) {
+      if (!purgeErr?.message?.includes('PERMISSION_DENIED') && purgeErr?.code !== 7) {
+        console.warn('[WhatsApp Bridge] Error durante purga automática de Leads:', purgeErr);
+      }
     }
-  } catch (purgeErr) {
-    console.warn('[WhatsApp Bridge] Error durante purga automática de Leads:', purgeErr);
   }
 
   await logWhatsAppAudit({
@@ -1072,40 +1105,42 @@ export async function deleteWhatsAppChatHandler(
     const cleanDigits = contactPhone.replace(/\D/g, '');
     const normPhone = contactPhone.startsWith('+') ? contactPhone : `+${cleanDigits}`;
 
-    const messagesRef = adminDb.collection('whatsapp_mensajes');
-    const snap1 = await messagesRef
-      .where('lineaId', '==', lineaId)
-      .where('remitenteTelefono', '==', normPhone)
-      .get();
-    const snap2 = await messagesRef
-      .where('lineaId', '==', lineaId)
-      .where('destinatarioTelefono', '==', normPhone)
-      .get();
-
-    const docIds = new Set<string>();
-    snap1.docs.forEach((d) => docIds.add(d.id));
-    snap2.docs.forEach((d) => docIds.add(d.id));
-
-    if (cleanDigits.length >= 10) {
-      const snap3 = await messagesRef
+    if (hasAdminCredentials) {
+      const messagesRef = adminDb.collection('whatsapp_mensajes');
+      const snap1 = await messagesRef
         .where('lineaId', '==', lineaId)
-        .where('remitenteTelefono', '==', `+58${cleanDigits.slice(-10)}`)
+        .where('remitenteTelefono', '==', normPhone)
         .get();
-      const snap4 = await messagesRef
+      const snap2 = await messagesRef
         .where('lineaId', '==', lineaId)
-        .where('destinatarioTelefono', '==', `+58${cleanDigits.slice(-10)}`)
+        .where('destinatarioTelefono', '==', normPhone)
         .get();
-      snap3.docs.forEach((d) => docIds.add(d.id));
-      snap4.docs.forEach((d) => docIds.add(d.id));
-    }
 
-    const batch = adminDb.batch();
-    for (const id of docIds) {
-      batch.delete(messagesRef.doc(id));
-    }
-    if (docIds.size > 0) {
-      await batch.commit();
-      console.log(`[WhatsApp Bridge] Eliminados ${docIds.size} mensajes del chat ${normPhone}.`);
+      const docIds = new Set<string>();
+      snap1.docs.forEach((d) => docIds.add(d.id));
+      snap2.docs.forEach((d) => docIds.add(d.id));
+
+      if (cleanDigits.length >= 10) {
+        const snap3 = await messagesRef
+          .where('lineaId', '==', lineaId)
+          .where('remitenteTelefono', '==', `+58${cleanDigits.slice(-10)}`)
+          .get();
+        const snap4 = await messagesRef
+          .where('lineaId', '==', lineaId)
+          .where('destinatarioTelefono', '==', `+58${cleanDigits.slice(-10)}`)
+          .get();
+        snap3.docs.forEach((d) => docIds.add(d.id));
+        snap4.docs.forEach((d) => docIds.add(d.id));
+      }
+
+      const batch = adminDb.batch();
+      for (const id of docIds) {
+        batch.delete(messagesRef.doc(id));
+      }
+      if (docIds.size > 0) {
+        await batch.commit();
+        console.log(`[WhatsApp Bridge] Eliminados ${docIds.size} mensajes del chat ${normPhone}.`);
+      }
     }
 
     // Sincronizar borrado con el teléfono real de WhatsApp si el socket está activo
