@@ -31,6 +31,7 @@ import { PaymentRecord, BillingInvoice } from '../types/finance';
 import {
   parseBankReceiptText,
   parseVenezuelanOrInternationalAmount,
+  mergeReceiptResults,
   formatCaracasDate,
   getCaracasToday,
   isFutureCaracasDate,
@@ -411,14 +412,85 @@ export function evaluateVeracityScore(params: VeracityEvaluationParams): {
  * Preprocesa una imagen en navegador aplicando rotación (90°, 180°, 270°)
  * o inversión cromática negativa para comprobantes bancarios en modo oscuro.
  */
+
+const OCR_TRANSCRIPTIONS_KEY = 'puro_apure_ocr_transcriptions_v1';
+const ocrMemoryCache = new Map<string, PagoReportadoOCR>();
+
+/**
+ * Guarda una transcripción de comprobante analizado en memoria activa (Map) y localStorage
+ */
+export function saveTranscriptionToMemory(payment: PagoReportadoOCR): void {
+  if (!payment) return;
+  if (payment.sha256Bytes) ocrMemoryCache.set(payment.sha256Bytes, payment);
+  if (payment.id) ocrMemoryCache.set(payment.id, payment);
+  if (payment.numeroReferencia) ocrMemoryCache.set(payment.numeroReferencia, payment);
+
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      const stored = localStorage.getItem(OCR_TRANSCRIPTIONS_KEY);
+      const list: PagoReportadoOCR[] = stored ? JSON.parse(stored) : [];
+      const filtered = list.filter((p) => p.id !== payment.id && p.sha256Bytes !== payment.sha256Bytes);
+      filtered.unshift(payment);
+      if (filtered.length > 50) filtered.pop();
+      localStorage.setItem(OCR_TRANSCRIPTIONS_KEY, JSON.stringify(filtered));
+    } catch (e) {
+      console.warn('[OcrForensicService] Error persistiendo en localStorage:', e);
+    }
+  }
+}
+
+/**
+ * Recupera una transcripción guardada previamente por su SHA-256, ID o Número de Referencia
+ */
+export function getTranscriptionFromMemory(identifier: string): PagoReportadoOCR | null {
+  if (!identifier) return null;
+  if (ocrMemoryCache.has(identifier)) {
+    return ocrMemoryCache.get(identifier)!;
+  }
+  if (typeof window !== 'undefined' && window.localStorage) {
+    try {
+      const stored = localStorage.getItem(OCR_TRANSCRIPTIONS_KEY);
+      if (stored) {
+        const list: PagoReportadoOCR[] = JSON.parse(stored);
+        const match = list.find(
+          (p) =>
+            p.id === identifier ||
+            p.sha256Bytes === identifier ||
+            p.numeroReferencia === identifier ||
+            p.referenciaNormalizada === identifier
+        );
+        if (match) {
+          ocrMemoryCache.set(identifier, match);
+          return match;
+        }
+      }
+    } catch {}
+  }
+  return null;
+}
+
+export type PreprocessFilter = 'none' | 'invert' | 'high_luminance_isolation' | 'clahe_contrast';
+
+/**
+ * Preprocesa una imagen en navegador aplicando rotación (90°, 180°, 270°)
+ * o filtros ópticos:
+ * - invert: Negativo cromático estándar
+ * - high_luminance_isolation: Aislamiento de píxeles de alta luminancia (Y >= 200).
+ *   Convierte texto blanco (#FFFFFF) a negro puro (0,0,0) y píldoras grises (~#8E8E93, Y ~ 140)
+ *   o fondos oscuros a blanco puro (255,255,255).
+ * - clahe_contrast: Estiramiento de contraste dinámico.
+ */
 export async function preprocessOrRotateImage(
   dataUri: string,
   rotationDeg: 0 | 90 | 180 | 270 = 0,
-  invertColors: boolean = false
+  filter: PreprocessFilter | boolean = 'none'
 ): Promise<string> {
   if (typeof window === 'undefined' || typeof document === 'undefined') {
     return dataUri;
   }
+  const actualFilter: PreprocessFilter =
+    typeof filter === 'boolean' ? (filter ? 'invert' : 'none') : filter;
+
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -435,18 +507,52 @@ export async function preprocessOrRotateImage(
         ctx.rotate((rotationDeg * Math.PI) / 180);
         ctx.drawImage(img, -img.width / 2, -img.height / 2);
 
-        if (invertColors) {
+        if (actualFilter !== 'none') {
           const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
           const d = imgData.data;
-          for (let i = 0; i < d.length; i += 4) {
-            d[i] = 255 - d[i];
-            d[i + 1] = 255 - d[i + 1];
-            d[i + 2] = 255 - d[i + 2];
+
+          if (actualFilter === 'invert') {
+            for (let i = 0; i < d.length; i += 4) {
+              d[i] = 255 - d[i];
+              d[i + 1] = 255 - d[i + 1];
+              d[i + 2] = 255 - d[i + 2];
+            }
+          } else if (actualFilter === 'high_luminance_isolation') {
+            // Aislamiento de Alta Luminancia (Canal B - Especial para Píldoras Grises en Modo Oscuro BDV):
+            // Letras blancas (#FFFFFF, Y >= 200) -> Negro Puro (0, 0, 0)
+            // Píldora gris (~#8E8E93, Y ~ 140) y Fondo negro (#1C1C1E, Y ~ 30) -> Blanco Puro (255, 255, 255)
+            for (let i = 0; i < d.length; i += 4) {
+              const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+              if (y >= 200) {
+                d[i] = 0;
+                d[i + 1] = 0;
+                d[i + 2] = 0;
+              } else {
+                d[i] = 255;
+                d[i + 1] = 255;
+                d[i + 2] = 255;
+              }
+            }
+          } else if (actualFilter === 'clahe_contrast') {
+            let minLuma = 255;
+            let maxLuma = 0;
+            for (let i = 0; i < d.length; i += 4) {
+              const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+              if (y < minLuma) minLuma = y;
+              if (y > maxLuma) maxLuma = y;
+            }
+            const range = Math.max(1, maxLuma - minLuma);
+            for (let i = 0; i < d.length; i += 4) {
+              d[i] = Math.min(255, Math.max(0, ((d[i] - minLuma) / range) * 255));
+              d[i + 1] = Math.min(255, Math.max(0, ((d[i + 1] - minLuma) / range) * 255));
+              d[i + 2] = Math.min(255, Math.max(0, ((d[i + 2] - minLuma) / range) * 255));
+            }
           }
+
           ctx.putImageData(imgData, 0, 0);
         }
 
-        resolve(canvas.toDataURL('image/jpeg', 0.92));
+        resolve(canvas.toDataURL('image/jpeg', 0.95));
       } catch {
         resolve(dataUri);
       }
@@ -628,6 +734,9 @@ export class OcrForensicService {
       updatedTimestamp: Date.now(),
     });
 
+    // Persistencia en memoria activa y localStorage de la transcripción OCR
+    saveTranscriptionToMemory(pagoReportado);
+
     return pagoReportado;
   }
 
@@ -710,36 +819,39 @@ export class OcrForensicService {
         ? base64Clean
         : `data:${mimeType || 'image/jpeg'};base64,${base64Clean}`;
 
-      // Intentar primero a 0° orientación estándar
+      // Canal A: Pasada estándar a 0° orientación
       let ret = await worker.recognize(basePayload);
       let ocrRawText = ret?.data?.text || '';
       let parsed = parseBankReceiptText(ocrRawText);
 
-      // Si el texto es insuficiente o no es válido, probar con inversiones y rotaciones (90°, 180°, 270°)
-      if (!parsed.esComprobanteValido || parsed.montoOriginal <= 0 || !parsed.numeroReferencia) {
-        const transformations: { angle: 0 | 90 | 180 | 270; invert: boolean }[] = [
-          { angle: 0, invert: true },
-          { angle: 90, invert: false },
-          { angle: 180, invert: false },
-          { angle: 270, invert: false },
+      // Si falta monto, referencia o beneficiario, ejecutar Canal B (Aislamiento de Alta Luminancia) y transformaciones
+      if (!parsed.esComprobanteValido || parsed.montoOriginal <= 0 || !parsed.numeroReferencia || !parsed.rifCedula) {
+        const passes: { angle: 0 | 90 | 180 | 270; filter: PreprocessFilter }[] = [
+          // Canal B: Aislamiento de texto blanco sobre píldora gris en modo oscuro (Y >= 200)
+          { angle: 0, filter: 'high_luminance_isolation' },
+          // Inversión estándar
+          { angle: 0, filter: 'invert' },
+          // Rotaciones 90°, 180°, 270°
+          { angle: 90, filter: 'none' },
+          { angle: 180, filter: 'none' },
+          { angle: 270, filter: 'none' },
         ];
 
-        for (const t of transformations) {
+        for (const p of passes) {
           try {
-            const transformedPayload = await preprocessOrRotateImage(basePayload, t.angle, t.invert);
-            const tRet = await worker.recognize(transformedPayload);
-            const tText = tRet?.data?.text || '';
-            if (tText.trim().length > 10) {
-              const tParsed = parseBankReceiptText(tText);
-              if (tParsed.esComprobanteValido || (tParsed.montoOriginal > 0 && tParsed.numeroReferencia)) {
-                parsed = tParsed;
+            const transformedPayload = await preprocessOrRotateImage(basePayload, p.angle, p.filter);
+            const pRet = await worker.recognize(transformedPayload);
+            const pText = pRet?.data?.text || '';
+            if (pText.trim().length > 10) {
+              const pParsed = parseBankReceiptText(pText);
+              parsed = mergeReceiptResults(parsed, pParsed);
+              if (parsed.esComprobanteValido && parsed.montoOriginal > 0 && parsed.numeroReferencia) {
                 break;
               }
             }
           } catch (_) {}
         }
       }
-
       if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
         return {
           tipoComprobante: parsed.tipoComprobante,
@@ -793,6 +905,14 @@ export class OcrForensicService {
       patronBancarioValido: false,
       analisisVisualDetalle: 'Extracción visual no concluyente. Por favor verifique e introduzca los datos manualmente.',
     };
+  }
+
+  static saveTranscriptionToMemory(payment: PagoReportadoOCR): void {
+    saveTranscriptionToMemory(payment);
+  }
+
+  static getTranscriptionFromMemory(identifier: string): PagoReportadoOCR | null {
+    return getTranscriptionFromMemory(identifier);
   }
 
   static async saveReportedPayment(

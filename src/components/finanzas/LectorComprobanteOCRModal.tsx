@@ -101,11 +101,27 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
     return () => unsub();
   }, [isOpen]);
 
-  // Actualizar imagen inicial si se recibe por props
+  // Actualizar imagen inicial si se recibe por props y restaurar desde memoria persistente
   useEffect(() => {
     if (initialImageDataUrl) {
       setImageDataUrl(initialImageDataUrl);
-      setAnalyzedRecord(null);
+      const cached = OcrForensicService.getTranscriptionFromMemory(initialImageDataUrl);
+      if (cached) {
+        setAnalyzedRecord(cached);
+        if (cached.clienteIdSugerido) setSelectedEntityId(cached.clienteIdSugerido);
+        if (cached.facturaIdSeleccionada) setSelectedInvoiceId(cached.facturaIdSeleccionada);
+        if (cached.tipoComprobante) setTipoComprobante(cached.tipoComprobante);
+        if (cached.bancoEmisor) setBancoEmisor(cached.bancoEmisor);
+        if (cached.bancoReceptor) setBancoReceptor(cached.bancoReceptor);
+        if (cached.numeroReferencia) setNumeroReferencia(cached.numeroReferencia);
+        if (cached.fechaComprobante) setFechaComprobante(cached.fechaComprobante);
+        if (cached.monedaOriginal) setMonedaOriginal(cached.monedaOriginal);
+        if (cached.montoOriginal) setMontoOriginal(cached.montoOriginal);
+        if (cached.tasaBcvSnapshot) setTasaBcvSnapshot(cached.tasaBcvSnapshot);
+        if (cached.notasRevision) setNotasRevision(cached.notasRevision);
+      } else {
+        setAnalyzedRecord(null);
+      }
     }
   }, [initialImageDataUrl]);
 
@@ -210,8 +226,22 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
       const dataUrl = event.target?.result as string;
       setImageDataUrl(dataUrl);
       setImageMimeType(file.type);
-      setAnalyzedRecord(null);
       setErrorMsg(null);
+      const cached = OcrForensicService.getTranscriptionFromMemory(dataUrl);
+      if (cached) {
+        setAnalyzedRecord(cached);
+        if (cached.tipoComprobante) setTipoComprobante(cached.tipoComprobante);
+        if (cached.bancoEmisor) setBancoEmisor(cached.bancoEmisor);
+        if (cached.bancoReceptor) setBancoReceptor(cached.bancoReceptor);
+        if (cached.numeroReferencia) setNumeroReferencia(cached.numeroReferencia);
+        if (cached.fechaComprobante) setFechaComprobante(cached.fechaComprobante);
+        if (cached.monedaOriginal) setMonedaOriginal(cached.monedaOriginal);
+        if (cached.montoOriginal) setMontoOriginal(cached.montoOriginal);
+        if (cached.tasaBcvSnapshot) setTasaBcvSnapshot(cached.tasaBcvSnapshot);
+        if (cached.notasRevision) setNotasRevision(cached.notasRevision);
+      } else {
+        setAnalyzedRecord(null);
+      }
     };
     reader.readAsDataURL(file);
     e.target.value = '';
@@ -233,6 +263,7 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
       );
 
       setAnalyzedRecord(result);
+      OcrForensicService.saveTranscriptionToMemory(result);
       setTipoComprobante(result.tipoComprobante);
       setBancoEmisor(result.bancoEmisor || '');
       setBancoReceptor(result.bancoReceptor || '');

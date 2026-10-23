@@ -458,8 +458,13 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
 
   const cleanAmountCandidate = (raw: string): number => {
     if (!raw) return 0;
-    // Normalizar lecturas de Tesseract en modo oscuro donde "Bs" se confunde con "8s" o "$s"
-    const sanitized = raw.replace(/\b8s\b/gi, 'Bs').replace(/\$s\b/gi, 'Bs');
+    // Normalizar lecturas de Tesseract en modo oscuro donde "Bs" se confunde con "8s", "b5", "es", "ds" o "$s"
+    const sanitized = raw
+      .replace(/\b8s\b/gi, 'Bs')
+      .replace(/\bb5\b/gi, 'Bs')
+      .replace(/\bes\b/gi, 'Bs')
+      .replace(/\bds\b/gi, 'Bs')
+      .replace(/\$s\b/gi, 'Bs');
     return parseVenezuelanOrInternationalAmount(sanitized);
   };
 
@@ -491,6 +496,22 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
         if (parsedNext > 0) {
           montoOriginal = parsedNext;
           if (/usd|\$/i.test(line) || /usd|\$/i.test(nextLine)) monedaOriginal = 'USD';
+          break;
+        }
+      }
+    }
+  }
+
+  // 1.5 Escaneo línea a línea de montos aislados (ej. en BDV modo oscuro donde el monto "13.201,00 Bs" aparece en su propia línea)
+  if (montoOriginal === 0) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      // Línea con monto venezolano aislado, con o sin sufijo de moneda
+      const matchStandalone = line.match(/^([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})(?:\s*(?:bs\.?|ves|8s|b5|es|ds|bol[ií]vares))?$/i);
+      if (matchStandalone && matchStandalone[1]) {
+        const val = cleanAmountCandidate(matchStandalone[1]);
+        if (val > 0) {
+          montoOriginal = val;
           break;
         }
       }
@@ -582,23 +603,23 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (
-      /(?:documento\s*de\s*identidad|ci\s*\/?\s*rif\s*beneficiario|ci\s*\/?\s*rif|ci|rif|c[ée]dula)\b/i.test(
+      /(?:documento\s*de\s*identidad|ci\s*\/?\s*rif\s*beneficiario|ci\s*\/?\s*rif|ci|rif|c[ée]dula|identificaci[oó]n)\b/i.test(
         line
       )
     ) {
       const cand = line
         .replace(
-          /^.*?(?:documento\s*de\s*identidad|ci\s*\/?\s*rif\s*beneficiario|ci\s*\/?\s*rif|ci|rif|c[ée]dula)[:\s]*/i,
+          /^.*?(?:documento\s*de\s*identidad|ci\s*\/?\s*rif\s*beneficiario|ci\s*\/?\s*rif|ci|rif|c[ée]dula|identificaci[oó]n)[:\s]*/i,
           ''
         )
         .trim();
       const m =
         cand.match(
-          /\b([VvJjEeGg]-?[0-9]{1,2}(?:\.[0-9]{3}){2}(?:-[0-9])?|[VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?|[0-9]{1,2}(?:\.[0-9]{3}){2})\b/
+          /\b([VvJjEeGg]-?[0-9]{1,2}(?:\.[0-9]{3}){2}(?:-[0-9])?|[VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?|[0-9]{1,2}(?:\.[0-9]{3}){2}|[0-9]{6,9})\b/
         ) ||
         (lines[i + 1] &&
           lines[i + 1].match(
-            /\b([VvJjEeGg]-?[0-9]{1,2}(?:\.[0-9]{3}){2}(?:-[0-9])?|[VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?|[0-9]{1,2}(?:\.[0-9]{3}){2})\b/
+            /\b([VvJjEeGg]-?[0-9]{1,2}(?:\.[0-9]{3}){2}(?:-[0-9])?|[VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?|[0-9]{1,2}(?:\.[0-9]{3}){2}|[0-9]{6,9})\b/
           ));
       if (m) {
         let rawRif = m[1].toUpperCase().trim();
@@ -621,20 +642,26 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
   }
 
   if (!rifCedula) {
-    const rawRifMatch = text.match(
-      /\b([VvJjEeGg]-?[0-9]{1,2}(?:\.[0-9]{3}){2}(?:-[0-9])?|[VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?)\b/
-    );
-    if (rawRifMatch) {
-      let rawRif = rawRifMatch[1].toUpperCase().trim();
-      if (
-        !rawRif.startsWith('V-') &&
-        !rawRif.startsWith('J-') &&
-        !rawRif.startsWith('E-') &&
-        !rawRif.startsWith('G-')
-      ) {
-        rawRif = `${rawRif[0]}-${rawRif.slice(1)}`;
+    // Buscar etiqueta explícita "Identificación: 15235343" sin prefijo V-
+    const idExplicitMatch = text.match(/\bidentificaci[oó]n[:\s]*([0-9]{6,9})\b/i);
+    if (idExplicitMatch && idExplicitMatch[1]) {
+      rifCedula = `V-${idExplicitMatch[1].trim()}`;
+    } else {
+      const rawRifMatch = text.match(
+        /\b([VvJjEeGg]-?[0-9]{1,2}(?:\.[0-9]{3}){2}(?:-[0-9])?|[VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?)\b/
+      );
+      if (rawRifMatch) {
+        let rawRif = rawRifMatch[1].toUpperCase().trim();
+        if (
+          !rawRif.startsWith('V-') &&
+          !rawRif.startsWith('J-') &&
+          !rawRif.startsWith('E-') &&
+          !rawRif.startsWith('G-')
+        ) {
+          rawRif = `${rawRif[0]}-${rawRif.slice(1)}`;
+        }
+        rifCedula = rawRif;
       }
-      rifCedula = rawRif;
     }
   }
 
@@ -741,4 +768,47 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
     anomaliasEstructurales: anomalies,
     confianzaExtraccion,
   };
+}
+
+
+/**
+ * Fusiona los resultados de múltiples pasadas (ej. pasada normal, pasada de aislamiento de luminancia
+ * y pasada Gemini Vision), tomando el valor no vacío de mayor confianza para cada campo.
+ */
+export function mergeReceiptResults(
+  base: ParsedBankReceipt,
+  incoming: Partial<ParsedBankReceipt>
+): ParsedBankReceipt {
+  const merged: ParsedBankReceipt = {
+    ...base,
+    bancoEmisor: incoming.bancoEmisor || base.bancoEmisor,
+    bancoReceptor: incoming.bancoReceptor || base.bancoReceptor,
+    codigoBancoDestino: incoming.codigoBancoDestino || base.codigoBancoDestino,
+    numeroReferencia: incoming.numeroReferencia || base.numeroReferencia,
+    monedaOriginal: incoming.monedaOriginal || base.monedaOriginal,
+    montoOriginal: incoming.montoOriginal && incoming.montoOriginal > 0 ? incoming.montoOriginal : base.montoOriginal,
+    fechaComprobante:
+      incoming.fechaComprobante && incoming.fechaComprobante !== getCaracasToday()
+        ? incoming.fechaComprobante
+        : base.fechaComprobante,
+    horaComprobante: incoming.horaComprobante || base.horaComprobante,
+    fechaHoraDisplay: incoming.fechaHoraDisplay || base.fechaHoraDisplay,
+    rifCedula: incoming.rifCedula || base.rifCedula,
+    telefonoNombreEmisor: incoming.telefonoNombreEmisor || base.telefonoNombreEmisor,
+    cuentaOrigen: incoming.cuentaOrigen || base.cuentaOrigen,
+    concepto: incoming.concepto || base.concepto,
+    tipoComprobante: incoming.tipoComprobante || base.tipoComprobante,
+    anomaliasEstructurales: base.anomaliasEstructurales || [],
+    indicadoresManipulacionVisual: base.indicadoresManipulacionVisual || [],
+    esComprobanteValido: Boolean(
+      (incoming.bancoEmisor || base.bancoEmisor || incoming.bancoReceptor || base.bancoReceptor) &&
+        (incoming.numeroReferencia ||
+          base.numeroReferencia ||
+          (incoming.montoOriginal && incoming.montoOriginal > 0) ||
+          base.montoOriginal > 0)
+    ),
+    confianzaExtraccion: Math.max(base.confianzaExtraccion || 0, incoming.confianzaExtraccion || 0),
+  };
+
+  return merged;
 }

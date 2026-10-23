@@ -18,6 +18,7 @@ import {
   parseBankReceiptText,
   parseVenezuelanOrInternationalAmount,
   normalizeBankReference,
+  mergeReceiptResults,
   formatCaracasDate,
   getCaracasToday,
   isFutureCaracasDate,
@@ -26,6 +27,8 @@ import {
 import {
   evaluateVeracityScore,
   inspectExifAndMagicBytes,
+  saveTranscriptionToMemory,
+  getTranscriptionFromMemory,
 } from '../src/services/ocrForensicService';
 import { centsRound } from '../src/services/financialAnalyticsService';
 
@@ -281,23 +284,23 @@ Pago Ganado Puro Apure
   );
 
   // -------------------------------------------------------------------------
-  // ESCENARIO 4: BDV Modo Oscuro ("13.201,00 Bs" y "007689562549")
+  // ESCENARIO 4: BDV Modo Oscuro Real ("13.201,00 Bs" y "Identificación: 15235343")
   // -------------------------------------------------------------------------
-  console.log('\n📌 [ESCENARIO 4] BDV Modo Oscuro ("13.201,00 Bs"):');
-  const bdvDarkModeText = `
+  console.log('\n📌 [ESCENARIO 4] BDV Modo Oscuro Real ("13.201,00 Bs" en Píldora Gris & CI sin prefijo):');
+  const bdvDarkModeRealText = `
 PagomóvilBDV Personas
 ¡Pago Realizado con Éxito!
-Origen: 0102********3321
-Destino: 0134********9912
-Referencia: 007689562549
 13.201,00 Bs
-Fecha: 22/10/2026 02:45 PM
-Teléfono: 0414-9988776
-Cédula: V-15443210
-Concepto: Compra Queso Apureño
+Fecha: 16/10/2026
+Operación: 007689562549 ❐
+Identificación: 15235343
+Origen: 0102****8615
+Destino: 04126703512
+Banco: 0108 - BBVA PROVINCIAL
+Concepto: rifa
   `.trim();
 
-  const bdvParsed = parseBankReceiptText(bdvDarkModeText);
+  const bdvParsed = parseBankReceiptText(bdvDarkModeRealText);
 
   assert(
     bdvParsed.bancoEmisor.includes('Banco de Venezuela'),
@@ -306,13 +309,47 @@ Concepto: Compra Queso Apureño
   );
   assert(
     bdvParsed.numeroReferencia === '007689562549',
-    'Número de Referencia exacto: 007689562549',
+    'Número de Referencia exacto: 007689562549 (12 dígitos, filtrado ❐)',
     `Obtenido: "${bdvParsed.numeroReferencia}"`
   );
   assert(
     bdvParsed.montoOriginal === 13201.0,
-    'Monto en modo oscuro normalizado con sufijo "Bs": 13201.00 VES',
+    'Monto en píldora gris extraído y normalizado: 13201.00 VES (nunca 0)',
     `Obtenido: ${bdvParsed.montoOriginal}`
+  );
+  assert(
+    bdvParsed.rifCedula === 'V-15235343',
+    'Identificación sin prefijo V- normalizada a: V-15235343 (nunca N/A)',
+    `Obtenido: "${bdvParsed.rifCedula}"`
+  );
+  assert(
+    bdvParsed.telefonoNombreEmisor === '04126703512',
+    'Teléfono destino extraído: 04126703512',
+    `Obtenido: "${bdvParsed.telefonoNombreEmisor}"`
+  );
+  assert(
+    bdvParsed.bancoReceptor.includes('BBVA Provincial') || bdvParsed.codigoBancoDestino === '0108',
+    'Banco Destino identificado: 0108 - BBVA Provincial',
+    `Obtenido: "${bdvParsed.bancoReceptor}"`
+  );
+  assert(
+    bdvParsed.concepto === 'rifa',
+    'Concepto extraído: rifa',
+    `Obtenido: "${bdvParsed.concepto}"`
+  );
+
+  // Conversión bimonetaria exacta con BCV Rate
+  const bdvUsd = centsRound(bdvParsed.montoOriginal / BCV_RATE);
+  const bdvVes = centsRound(bdvParsed.montoOriginal * 1);
+  assert(
+    bdvUsd === 14.90,
+    `Cálculo Bimonetario Exacto: Bs. 13.201,00 / 886.2271 = $14.90 USD`,
+    `Obtenido: $${bdvUsd} USD`
+  );
+  assert(
+    bdvVes === 13201.0,
+    `Equivalente VES Exacto: Bs. 13201.00`,
+    `Obtenido: Bs. ${bdvVes}`
   );
 
   // Caso con confusión OCR de "8s" por "Bs"
@@ -320,6 +357,7 @@ Concepto: Compra Queso Apureño
 PagomóvilBDV Personas
 Referencia: 007689562549
 13.201,00 8s
+Identificación: 15235343
   `.trim();
   const bdvParsed8s = parseBankReceiptText(bdvDarkModeText8s);
   assert(
@@ -328,6 +366,7 @@ Referencia: 007689562549
     `Obtenido: ${bdvParsed8s.montoOriginal}`
   );
 
+  // Evaluación de Veracidad Forense: Debe otorgar >= 95%
   const bdvVeracity = evaluateVeracityScore({
     esDuplicado: false,
     tieneFirmasIAOEdicion: false,
@@ -342,12 +381,82 @@ Referencia: 007689562549
     montoOriginal: bdvParsed.montoOriginal,
     fechaComprobante: bdvParsed.fechaComprobante,
     isDateInFuture: false,
-    hasBeneficiaryData: true,
+    hasBeneficiaryData: Boolean(bdvParsed.rifCedula || bdvParsed.telefonoNombreEmisor),
   });
   assert(
-    bdvVeracity.score >= 90 && bdvVeracity.veredicto === 'AUTENTICO_ALTA_CONFIANZA',
-    `Score Forense BDV Modo Oscuro >= 90% con Veredicto AUTÉNTICO (Score: ${bdvVeracity.score}%)`,
+    bdvVeracity.score >= 95 && bdvVeracity.veredicto === 'AUTENTICO_ALTA_CONFIANZA',
+    `Score Forense BDV Modo Oscuro >= 95% con Veredicto AUTÉNTICO (Score: ${bdvVeracity.score}%)`,
     `Dictamen: ${bdvVeracity.veredicto}`
+  );
+
+  // -------------------------------------------------------------------------
+  // ESCENARIO 4B: Fusión Multi-Pass (mergeReceiptResults)
+  // -------------------------------------------------------------------------
+  console.log('\n📌 [ESCENARIO 4B] Fusión Multi-Pass de Pasadas Ópticas:');
+  const passA_sinMonto = parseBankReceiptText(`
+PagomóvilBDV Personas
+Operación: 007689562549
+Identificación: 15235343
+  `);
+  const passB_altaLuminancia = parseBankReceiptText(`
+13.201,00 Bs
+  `);
+  const fusedReceipt = mergeReceiptResults(passA_sinMonto, passB_altaLuminancia);
+  assert(
+    fusedReceipt.numeroReferencia === '007689562549' &&
+      fusedReceipt.montoOriginal === 13201.0 &&
+      fusedReceipt.rifCedula === 'V-15235343' &&
+      fusedReceipt.esComprobanteValido,
+    'Fusión Inteligente Multi-Pass: combina campos de Canal A y Canal B sin pérdidas',
+    `Ref: ${fusedReceipt.numeroReferencia}, Monto: ${fusedReceipt.montoOriginal}, CI: ${fusedReceipt.rifCedula}`
+  );
+
+  // -------------------------------------------------------------------------
+  // ESCENARIO 4C: Persistencia en Memoria de la Transcripción OCR
+  // -------------------------------------------------------------------------
+  console.log('\n📌 [ESCENARIO 4C] Persistencia en Memoria de la Transcripción OCR:');
+  const mockTranscriptionRecord: any = {
+    id: 'OCR-TEST-BDV-001',
+    sha256Bytes: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    numeroReferencia: '007689562549',
+    referenciaNormalizada: '007689562549',
+    bancoEmisor: 'Banco de Venezuela',
+    bancoReceptor: '0108 - BBVA Provincial',
+    montoOriginal: 13201.0,
+    monedaOriginal: 'VES',
+    montoEquivalenteUSD: 14.9,
+    montoEquivalenteVES: 13201.0,
+    tasaBcvSnapshot: 886.2271,
+    fechaComprobante: '2026-10-16',
+    rifCedula: 'V-15235343',
+    telefonoNombreEmisor: '04126703512',
+    concepto: 'rifa',
+    dictamenVeracidad: {
+      veredicto: 'AUTENTICO_ALTA_CONFIANZA',
+      score: 100,
+    },
+  };
+
+  saveTranscriptionToMemory(mockTranscriptionRecord);
+
+  const retrievedById = getTranscriptionFromMemory('OCR-TEST-BDV-001');
+  const retrievedByHash = getTranscriptionFromMemory('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+  const retrievedByRef = getTranscriptionFromMemory('007689562549');
+
+  assert(
+    Boolean(retrievedById && retrievedById.montoOriginal === 13201.0 && retrievedById.rifCedula === 'V-15235343'),
+    'Recuperación instantánea desde memoria por ID de OCR',
+    `Monto: ${retrievedById?.montoOriginal}, CI: ${retrievedById?.rifCedula}`
+  );
+  assert(
+    Boolean(retrievedByHash && retrievedByHash.montoEquivalenteUSD === 14.9),
+    'Recuperación instantánea desde memoria por SHA-256 de la imagen',
+    `Equivalente USD: $${retrievedByHash?.montoEquivalenteUSD}`
+  );
+  assert(
+    Boolean(retrievedByRef && retrievedByRef.bancoEmisor === 'Banco de Venezuela'),
+    'Recuperación instantánea desde memoria por Número de Referencia',
+    `Emisor: ${retrievedByRef?.bancoEmisor}`
   );
 
   // -------------------------------------------------------------------------
