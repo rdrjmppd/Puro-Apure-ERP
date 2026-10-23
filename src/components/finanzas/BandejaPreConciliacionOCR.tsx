@@ -269,7 +269,7 @@ export const BandejaPreConciliacionOCR: React.FC<BandejaPreConciliacionOCRProps>
             <button
               key={item.key}
               onClick={() => setFiltro(item.key)}
-              className={`min-h-[36px] px-3 py-1 rounded-lg text-xs font-semibold transition cursor-pointer ${
+              className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold transition cursor-pointer flex items-center justify-center ${
                 filtro === item.key
                   ? 'bg-purple-600 text-white shadow-xs'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
@@ -288,7 +288,7 @@ export const BandejaPreConciliacionOCR: React.FC<BandejaPreConciliacionOCRProps>
             value={busqueda}
             onChange={(e) => setBusqueda(e.target.value)}
             placeholder="Buscar por referencia, banco, cliente, RIF o teléfono..."
-            className="w-full min-h-[40px] pl-9 pr-3 py-1.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-hidden focus:border-purple-500 transition font-sans"
+            className="w-full min-h-[44px] pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white placeholder-slate-500 focus:outline-hidden focus:border-purple-500 transition font-sans"
           />
           {busqueda && (
             <button
@@ -343,7 +343,7 @@ export const BandejaPreConciliacionOCR: React.FC<BandejaPreConciliacionOCRProps>
                       </p>
                       <button
                         onClick={onOpenNewOCRModal}
-                        className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-600/30 hover:bg-purple-600/50 text-purple-300 text-xs font-medium border border-purple-500/40 transition cursor-pointer"
+                        className="mt-2 inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-purple-600/30 hover:bg-purple-600/50 text-purple-300 text-xs font-semibold border border-purple-500/40 transition cursor-pointer min-h-[44px]"
                       >
                         <Plus className="w-3.5 h-3.5" />
                         <span>Analizar un Comprobante Ahora</span>
@@ -453,7 +453,7 @@ export const BandejaPreConciliacionOCR: React.FC<BandejaPreConciliacionOCRProps>
                       <td className="py-3 px-4 text-right" onClick={(e) => e.stopPropagation()}>
                         <button
                           onClick={() => onSelectRecord(p)}
-                          className={`min-h-[38px] px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 ml-auto ${
+                          className={`min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 ml-auto ${
                             isConciliado
                               ? 'bg-slate-800 hover:bg-slate-700 text-slate-300'
                               : 'bg-purple-600 hover:bg-purple-500 text-white shadow-md shadow-purple-950/40'

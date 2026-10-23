@@ -848,73 +848,98 @@ export class OcrForensicService {
     // 2. Capa Secundaria: Reconocimiento Óptico Real sobre Píxeles en Cliente (Tesseract.js)
     let worker: any = null;
     try {
-      const { createWorker } = await import('tesseract.js');
-      worker = await createWorker('spa+eng');
-      const basePayload = base64Clean.startsWith('data:')
-        ? base64Clean
-        : `data:${mimeType || 'image/jpeg'};base64,${base64Clean}`;
+      // Validar si los bytes decodificados corresponden a un formato de imagen real (JPEG, PNG, GIF, BMP, WEBP)
+      let isValidImageFormat = false;
+      try {
+        const rawHead = typeof atob !== 'undefined'
+          ? atob(base64Clean.substring(0, 32))
+          : Buffer.from(base64Clean.substring(0, 32), 'base64').toString('binary');
+        const headerBytes = new Uint8Array(rawHead.length);
+        for (let i = 0; i < rawHead.length; i++) {
+          headerBytes[i] = rawHead.charCodeAt(i);
+        }
+        isValidImageFormat =
+          (headerBytes[0] === 0xff && headerBytes[1] === 0xd8 && headerBytes[2] === 0xff) || // JPEG
+          (headerBytes[0] === 0x89 && headerBytes[1] === 0x50 && headerBytes[2] === 0x4e && headerBytes[3] === 0x47) || // PNG
+          (headerBytes[0] === 0x47 && headerBytes[1] === 0x49 && headerBytes[2] === 0x46) || // GIF
+          (headerBytes[0] === 0x42 && headerBytes[1] === 0x4d) || // BMP
+          (headerBytes[0] === 0x52 && headerBytes[1] === 0x49 && headerBytes[2] === 0x46 && headerBytes[3] === 0x46); // WEBP
+      } catch {}
 
-      // Canal A: Pasada estándar a 0° orientación
-      let ret = await worker.recognize(basePayload);
-      let ocrRawText = ret?.data?.text || '';
-      let parsed = parseBankReceiptText(ocrRawText);
+      let parsed: any = null;
 
-      // Si falta monto, referencia o beneficiario, ejecutar Canal B (Aislamiento de Alta Luminancia) y transformaciones
-      if (!parsed.esComprobanteValido || parsed.montoOriginal <= 0 || !parsed.numeroReferencia || !parsed.rifCedula) {
-        const passes: { angle: 0 | 90 | 180 | 270; filter: PreprocessFilter }[] = [
-          // Canal B: Aislamiento de texto blanco sobre píldora gris en modo oscuro (Y >= 195)
-          { angle: 0, filter: 'high_luminance_isolation' },
-          // Inversión estándar
-          { angle: 0, filter: 'invert' },
-          // Rotaciones 90°, 180°, 270°
-          { angle: 90, filter: 'none' },
-          { angle: 180, filter: 'none' },
-          { angle: 270, filter: 'none' },
-        ];
+      if (isValidImageFormat) {
+        const { createWorker } = await import('tesseract.js');
+        worker = await createWorker('spa+eng');
+        const basePayload = base64Clean.startsWith('data:')
+          ? base64Clean
+          : `data:${mimeType || 'image/jpeg'};base64,${base64Clean}`;
 
-        for (const p of passes) {
-          try {
-            const transformedPayload = await preprocessOrRotateImage(basePayload, p.angle, p.filter);
-            const pRet = await worker.recognize(transformedPayload);
-            const pText = pRet?.data?.text || '';
-            if (pText.trim().length > 10) {
-              const pParsed = parseBankReceiptText(pText);
-              parsed = mergeReceiptResults(parsed, pParsed);
-              if (parsed.esComprobanteValido && parsed.montoOriginal > 0 && parsed.numeroReferencia) {
-                break;
+        // Canal A: Pasada estándar a 0° orientación
+        let ocrRawText = '';
+        try {
+          const ret = await worker.recognize(basePayload);
+          ocrRawText = ret?.data?.text || '';
+        } catch (recErr) {
+          console.debug('[OcrForensicService] Error en pasada inicial Tesseract:', recErr);
+        }
+        parsed = parseBankReceiptText(ocrRawText);
+
+        // Si falta monto, referencia o beneficiario, ejecutar Canal B (Aislamiento de Alta Luminancia) y transformaciones
+        if (!parsed.esComprobanteValido || parsed.montoOriginal <= 0 || !parsed.numeroReferencia || !parsed.rifCedula) {
+          const passes: { angle: 0 | 90 | 180 | 270; filter: PreprocessFilter }[] = [
+            // Canal B: Aislamiento de texto blanco sobre píldora gris en modo oscuro (Y >= 195)
+            { angle: 0, filter: 'high_luminance_isolation' },
+            // Inversión estándar
+            { angle: 0, filter: 'invert' },
+            // Rotaciones 90°, 180°, 270°
+            { angle: 90, filter: 'none' },
+            { angle: 180, filter: 'none' },
+            { angle: 270, filter: 'none' },
+          ];
+
+          for (const p of passes) {
+            try {
+              const transformedPayload = await preprocessOrRotateImage(basePayload, p.angle, p.filter);
+              const pRet = await worker.recognize(transformedPayload);
+              const pText = pRet?.data?.text || '';
+              if (pText.trim().length > 10) {
+                const pParsed = parseBankReceiptText(pText);
+                parsed = mergeReceiptResults(parsed, pParsed);
+                if (parsed.esComprobanteValido && parsed.montoOriginal > 0 && parsed.numeroReferencia) {
+                  break;
+                }
               }
-            }
-          } catch (_) {}
+            } catch (_) {}
+          }
         }
       }
 
       // Si teníamos datos parciales del backend, fusionar asegurando que el monto extraído prevalezca
       if (backendData) {
-        parsed = mergeReceiptResults(
-          {
-            tipoComprobante: backendData.tipoComprobante || 'PAGO_MOVIL',
-            bancoEmisor: backendData.bancoEmisor || '',
-            bancoReceptor: backendData.bancoReceptor || '',
-            codigoBancoDestino: backendData.codigoBancoDestino || '',
-            numeroReferencia: backendData.numeroReferencia || '',
-            montoOriginal: parseVenezuelanOrInternationalAmount(String(backendData.montoOriginal || 0)),
-            monedaOriginal: backendData.monedaOriginal === 'USD' ? 'USD' : 'VES',
-            fechaComprobante: backendData.fechaComprobante || getCaracasToday(),
-            horaComprobante: backendData.horaComprobante || '',
-            fechaHoraDisplay: backendData.fechaHoraDisplay || '',
-            rifCedula: backendData.rifCedula || '',
-            telefonoNombreEmisor: backendData.telefonoNombreEmisor || '',
-            cuentaOrigen: backendData.cuentaOrigen || '',
-            concepto: backendData.concepto || '',
-            indicadoresManipulacionVisual: [],
-            anomaliasEstructurales: [],
-            confianzaExtraccion: 90,
-            esComprobanteValido: true,
-          },
-          parsed
-        );
+        const backendParsed: import('../utils/bankReceiptParser').ParsedBankReceipt = {
+          tipoComprobante: (backendData.tipoComprobante || 'PAGO_MOVIL') as TipoComprobanteOCR,
+          bancoEmisor: backendData.bancoEmisor || '',
+          bancoReceptor: backendData.bancoReceptor || '',
+          codigoBancoDestino: backendData.codigoBancoDestino || '',
+          numeroReferencia: backendData.numeroReferencia || '',
+          montoOriginal: parseVenezuelanOrInternationalAmount(String(backendData.montoOriginal || 0)),
+          monedaOriginal: backendData.monedaOriginal === 'USD' ? 'USD' : 'VES',
+          fechaComprobante: backendData.fechaComprobante || getCaracasToday(),
+          horaComprobante: backendData.horaComprobante || '',
+          fechaHoraDisplay: backendData.fechaHoraDisplay || '',
+          rifCedula: backendData.rifCedula || '',
+          telefonoNombreEmisor: backendData.telefonoNombreEmisor || '',
+          cuentaOrigen: backendData.cuentaOrigen || '',
+          concepto: backendData.concepto || '',
+          indicadoresManipulacionVisual: [],
+          anomaliasEstructurales: [],
+          confianzaExtraccion: 90,
+          esComprobanteValido: true,
+        };
+        parsed = parsed ? mergeReceiptResults(backendParsed, parsed) : backendParsed;
       }
-      if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
+      if (parsed && (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia)) {
         return {
           tipoComprobante: parsed.tipoComprobante,
           bancoEmisor: parsed.bancoEmisor,

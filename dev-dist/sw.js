@@ -81,14 +81,14 @@ define(['./workbox-8d0d8005'], (function (workbox) { 'use strict';
     "revision": "3ca0b8505b4bec776b69afdba2768812"
   }, {
     "url": "index.html",
-    "revision": "0.sknlhlnpljg"
+    "revision": "0.0b27hr7j1n8"
   }], {});
   workbox.cleanupOutdatedCaches();
   workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html"), {
     allowlist: [/^\/$/],
     denylist: [/^\/api/]
   }));
-  workbox.registerRoute(/\/api\/(?!askGeminiAssistant|getBranding|uploadLogo|resetLogo).*/i, new workbox.NetworkFirst({
+  workbox.registerRoute(/\/api\/(?!askGeminiAssistant|getBranding|uploadLogo|resetLogo|whatsapp).*/i, new workbox.NetworkFirst({
     "cacheName": "api-dynamic-cache",
     "networkTimeoutSeconds": 3,
     plugins: [new workbox.ExpirationPlugin({

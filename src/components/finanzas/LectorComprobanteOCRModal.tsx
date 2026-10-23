@@ -482,10 +482,10 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
                       isZoomed ? 'max-h-[500px] w-full' : 'max-h-64'
                     }`}
                   />
-                  <div className="absolute top-2 right-2 flex items-center gap-1.5 bg-slate-900/80 p-1 rounded-xl backdrop-blur-xs border border-slate-700">
+                  <div className="absolute top-2 right-2 flex items-center gap-1.5 bg-slate-900/90 p-1 rounded-2xl backdrop-blur-xs border border-slate-700">
                     <button
                       onClick={() => setIsZoomed(!isZoomed)}
-                      className="p-1.5 text-slate-300 hover:text-white"
+                      className="p-2 text-slate-300 hover:text-white min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer"
                       title="Expandir imagen"
                     >
                       <Maximize2 className="w-4 h-4" />
@@ -495,7 +495,7 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
                         setImageDataUrl(null);
                         setAnalyzedRecord(null);
                       }}
-                      className="p-1.5 text-rose-400 hover:text-rose-200"
+                      className="p-2 text-rose-400 hover:text-rose-200 min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer"
                       title="Quitar imagen"
                     >
                       <X className="w-4 h-4" />

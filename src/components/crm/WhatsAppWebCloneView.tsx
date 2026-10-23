@@ -235,7 +235,7 @@ const WhatsAppAudioMessagePlayer: React.FC<WhatsAppAudioMessagePlayerProps> = ({
         <button
           type="button"
           onClick={toggleSpeed}
-          className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-white/10 hover:bg-white/20 transition cursor-pointer min-h-[24px]"
+          className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-white/10 hover:bg-white/20 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center"
         >
           {speed}x
         </button>
@@ -981,7 +981,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
               <button
                 key={l.id ? `line-${l.id}` : `line-idx-${index}`}
                 onClick={() => setActiveLineId(l.id)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 min-h-[38px] ${
+                className={`px-3 py-2 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 min-h-[44px] ${
                   activeLineId === l.id
                     ? 'bg-purple-600 text-white shadow-md'
                     : 'text-slate-400 hover:text-slate-200'
@@ -1254,7 +1254,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                   {/* Botón Plantillas Inteligentes */}
                   <button
                     onClick={() => setShowTemplatesModal(true)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-950/70 hover:bg-purple-900/80 text-purple-300 border border-purple-700 text-xs font-semibold transition min-h-[38px] cursor-pointer"
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-purple-950/70 hover:bg-purple-900/80 text-purple-300 border border-purple-700 text-xs font-semibold transition min-h-[44px] cursor-pointer"
                     title="Insertar Plantilla Oficial de Cobranza o Facturación"
                   >
                     <Sparkles className="w-3.5 h-3.5 text-purple-400" />
@@ -1266,7 +1266,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                     href={WhatsAppCloneService.generateWaMeLink(selectedContact.telefonoE164, messageInput)}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="p-2 rounded-xl bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-800 transition min-h-[38px] min-w-[38px] flex items-center justify-center cursor-pointer"
+                    className="p-2.5 rounded-xl bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-800 transition min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer"
                     title="Abrir directamente en aplicación WhatsApp (wa.me)"
                   >
                     <ExternalLink className="w-4 h-4 text-emerald-400" />
@@ -1275,7 +1275,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                   {/* Botón Ver Expediente 360 en móvil */}
                   <button
                     onClick={() => setMobileTab('EXPEDIENTE')}
-                    className="md:hidden p-2 rounded-xl bg-slate-800 text-slate-300 border border-slate-700 min-h-[38px]"
+                    className="md:hidden p-2.5 rounded-xl bg-slate-800 text-slate-300 border border-slate-700 min-h-[44px] min-w-[44px] flex items-center justify-center cursor-pointer"
                   >
                     <ChevronRight className="w-4 h-4" />
                   </button>
@@ -1346,7 +1346,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                                         onAnalyzeReceiptOCR(msg.mediaUrl, selectedContact);
                                       }
                                     }}
-                                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 shadow transition cursor-pointer min-h-[32px]"
+                                    className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow transition cursor-pointer min-h-[44px]"
                                   >
                                     <Sparkles className="w-3 h-3" />
                                     <span>🔍 Analizar con OCR</span>
@@ -1698,7 +1698,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                   <button
                     onClick={handleForceResetQr}
                     disabled={isGeneratingQr || isDisconnecting}
-                    className="w-full py-2 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 text-xs font-semibold transition cursor-pointer min-h-[40px] flex items-center justify-center gap-2 disabled:opacity-50"
+                    className="w-full py-2.5 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/30 text-xs font-semibold transition cursor-pointer min-h-[44px] flex items-center justify-center gap-2 disabled:opacity-50"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 text-purple-400 ${isGeneratingQr ? 'animate-spin' : ''}`} />
                     <span>🔄 Forzar Nuevo QR / Re-vincular</span>
