@@ -1584,38 +1584,61 @@ REGLAS OBLIGATORIAS:
       const { createWorker } = await import('tesseract.js');
       let worker: any = null;
       try {
-        worker = await createWorker(['spa', 'eng'], 1, {
-          langPath: process.cwd(),
+        const cwd = process.cwd();
+        const hasGz = fs.existsSync(path.join(cwd, 'spa.traineddata.gz'));
+        const hasUncompressed = fs.existsSync(path.join(cwd, 'spa.traineddata'));
+
+        const workerOptions: any = {
           logger: () => {},
-        });
-        const ret = await worker.recognize(imageBuffer);
-        const ocrRawText = ret?.data?.text || '';
-        if (ocrRawText.trim().length > 10) {
-          const parsed = parseBankReceiptText(ocrRawText);
-          if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
-            return {
-              success: true,
-              data: {
-                tipoComprobante: parsed.tipoComprobante,
-                bancoEmisor: parsed.bancoEmisor,
-                bancoReceptor: parsed.bancoReceptor,
-                codigoBancoDestino: parsed.codigoBancoDestino,
-                fechaComprobante: parsed.fechaComprobante,
-                horaComprobante: parsed.horaComprobante,
-                fechaHoraDisplay: parsed.fechaHoraDisplay,
-                numeroReferencia: parsed.numeroReferencia,
-                monedaOriginal: parsed.monedaOriginal,
-                montoOriginal: parsed.montoOriginal,
-                rifCedula: parsed.rifCedula,
-                telefonoNombreEmisor: parsed.telefonoNombreEmisor,
-                cuentaOrigen: parsed.cuentaOrigen,
-                concepto: parsed.concepto,
-                consistenciaTipografica: true,
-                halosDeColor: false,
-                patronBancarioValido: true,
-                analisisVisualDetalle: 'Extracción óptica de píxeles mediante Tesseract OCR local con parser bancario nacional.',
-              },
-            };
+        };
+
+        if (hasGz) {
+          workerOptions.langPath = cwd;
+          workerOptions.gzip = true;
+        } else if (hasUncompressed) {
+          workerOptions.langPath = cwd;
+          workerOptions.gzip = false;
+        }
+
+        try {
+          worker = await createWorker(['spa', 'eng'], 1, workerOptions);
+        } catch (initErr) {
+          console.log('[OCR Backend] Reintentando inicialización de Tesseract sin ruta local forzada...');
+          worker = await createWorker(['spa', 'eng'], 1, { logger: () => {} }).catch(async () => {
+            return await createWorker('eng', 1, { logger: () => {} }).catch(() => null);
+          });
+        }
+
+        if (worker) {
+          const ret = await worker.recognize(imageBuffer);
+          const ocrRawText = ret?.data?.text || '';
+          if (ocrRawText.trim().length > 10) {
+            const parsed = parseBankReceiptText(ocrRawText);
+            if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
+              return {
+                success: true,
+                data: {
+                  tipoComprobante: parsed.tipoComprobante,
+                  bancoEmisor: parsed.bancoEmisor,
+                  bancoReceptor: parsed.bancoReceptor,
+                  codigoBancoDestino: parsed.codigoBancoDestino,
+                  fechaComprobante: parsed.fechaComprobante,
+                  horaComprobante: parsed.horaComprobante,
+                  fechaHoraDisplay: parsed.fechaHoraDisplay,
+                  numeroReferencia: parsed.numeroReferencia,
+                  monedaOriginal: parsed.monedaOriginal,
+                  montoOriginal: parsed.montoOriginal,
+                  rifCedula: parsed.rifCedula,
+                  telefonoNombreEmisor: parsed.telefonoNombreEmisor,
+                  cuentaOrigen: parsed.cuentaOrigen,
+                  concepto: parsed.concepto,
+                  consistenciaTipografica: true,
+                  halosDeColor: false,
+                  patronBancarioValido: true,
+                  analisisVisualDetalle: 'Extracción óptica de píxeles mediante Tesseract OCR local con parser bancario nacional.',
+                },
+              };
+            }
           }
         }
       } catch (workerErr: any) {
