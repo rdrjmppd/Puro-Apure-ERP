@@ -412,7 +412,11 @@ export interface PendingBridgeMessage {
   texto: string;
   timestamp: number;
   estado: 'ENVIADO' | 'ENTREGADO' | 'LEIDO' | 'FALLIDO';
-  tipoMensaje: 'TEXTO' | 'IMAGEN';
+  tipoMensaje: 'TEXTO' | 'IMAGEN' | 'DOCUMENTO' | 'DOCUMENTO_PDF' | 'AUDIO' | 'PLANTILLA';
+  mediaMimeType?: string;
+  audioDuration?: number;
+  audioDurationSeconds?: number;
+  isPtt?: boolean;
   mediaUrl?: string;
   hasComprobantePago?: boolean;
   senderName?: string;
@@ -521,7 +525,11 @@ async function saveMessageToFirestore(messageData: {
   texto: string;
   timestamp: number;
   estado: 'ENVIADO' | 'ENTREGADO' | 'LEIDO' | 'FALLIDO';
-  tipoMensaje: 'TEXTO' | 'IMAGEN';
+  tipoMensaje: 'TEXTO' | 'IMAGEN' | 'DOCUMENTO' | 'DOCUMENTO_PDF' | 'AUDIO' | 'PLANTILLA';
+  mediaMimeType?: string;
+  audioDuration?: number;
+  audioDurationSeconds?: number;
+  isPtt?: boolean;
   mediaUrl?: string;
   hasComprobantePago?: boolean;
   senderName?: string;
@@ -819,16 +827,34 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
       const contactEntry = contactsMap.get(senderPhone) || contactsMap.get(senderPhone.replace(/[^\d]/g, '')) || contactsMap.get(remoteJid);
       const cleanSender = cleanContactDisplayName(contactEntry?.name) || cleanContactDisplayName(msg.pushName);
 
+      // Desempaquetar mensajes anidados (ephemeralMessage, viewOnceMessage, etc.)
+      const rawMsg = msg.message;
+      const content =
+        rawMsg?.ephemeralMessage?.message ||
+        rawMsg?.viewOnceMessage?.message ||
+        rawMsg?.viewOnceMessageV2?.message ||
+        rawMsg?.documentWithCaptionMessage?.message ||
+        rawMsg;
+
       let textContent =
-        msg.message.conversation ||
-        msg.message.extendedTextMessage?.text ||
-        msg.message.imageMessage?.caption ||
+        content?.conversation ||
+        content?.extendedTextMessage?.text ||
+        content?.imageMessage?.caption ||
+        content?.documentMessage?.caption ||
         '';
 
       let mediaUrl: string | undefined = undefined;
-      const isImage = !!msg.message.imageMessage;
+      let mediaMimeType: string | undefined = undefined;
+      let audioDurationSeconds: number | undefined = undefined;
+      let isPtt: boolean | undefined = undefined;
+      let tipoMensaje: 'TEXTO' | 'IMAGEN' | 'DOCUMENTO' | 'AUDIO' = 'TEXTO';
+
+      const isImage = !!content?.imageMessage;
+      const audioMsg = content?.audioMessage;
+      const isAudio = !!audioMsg;
 
       if (isImage) {
+        tipoMensaje = 'IMAGEN';
         try {
           const buffer = await downloadMediaMessage(
             msg,
@@ -841,7 +867,8 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
           );
           // Mitigación DevSecOps (N5): Evitar rebasar límite de 1MB de Firestore
           if (buffer.length <= 800 * 1024) {
-            const mime = msg.message.imageMessage?.mimetype || 'image/jpeg';
+            const mime = content?.imageMessage?.mimetype || 'image/jpeg';
+            mediaMimeType = mime;
             mediaUrl = `data:${mime};base64,${buffer.toString('base64')}`;
           } else {
             console.warn(`[WhatsApp Bridge] Imagen entrante de ${buffer.length} bytes excede umbral seguro de 800KB.`);
@@ -851,6 +878,43 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
           }
         } catch (mediaErr) {
           console.warn('[WhatsApp Bridge] Error al descargar imagen:', mediaErr);
+        }
+      } else if (isAudio) {
+        tipoMensaje = 'AUDIO';
+        try {
+          const buffer = await downloadMediaMessage(
+            msg,
+            'buffer',
+            {},
+            {
+              logger: pino({ level: 'silent' }),
+              reuploadRequest: sock.updateMediaMessage,
+            }
+          );
+          const rawMime = audioMsg?.mimetype || 'audio/ogg; codecs=opus';
+          const cleanMime = rawMime.split(';')[0].trim() || 'audio/ogg';
+          mediaMimeType = rawMime;
+          audioDurationSeconds = audioMsg?.seconds || 0;
+          isPtt = Boolean(audioMsg?.ptt);
+
+          if (buffer.length <= 850 * 1024) {
+            mediaUrl = `data:${cleanMime};base64,${buffer.toString('base64')}`;
+          } else {
+            console.warn(`[WhatsApp Bridge] Audio entrante de ${buffer.length} bytes excede umbral seguro.`);
+            mediaUrl = `data:${cleanMime};base64,${buffer.toString('base64')}`;
+          }
+
+          const minutes = Math.floor(audioDurationSeconds / 60);
+          const seconds = Math.floor(audioDurationSeconds % 60).toString().padStart(2, '0');
+          const durationStr = `${minutes}:${seconds}`;
+          if (!textContent) {
+            textContent = isPtt ? `🎤 Nota de voz (${durationStr})` : `🎵 Mensaje de audio (${durationStr})`;
+          }
+        } catch (audioErr) {
+          console.warn('[WhatsApp Bridge] Error al descargar nota de voz/audio:', audioErr);
+          if (!textContent) {
+            textContent = '🎤 Nota de voz';
+          }
         }
       }
 
@@ -863,8 +927,12 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
         texto: textContent,
         timestamp: (msg.messageTimestamp as number) * 1000 || Date.now(),
         estado: 'LEIDO',
-        tipoMensaje: isImage ? 'IMAGEN' : 'TEXTO',
+        tipoMensaje,
         mediaUrl,
+        mediaMimeType,
+        audioDuration: audioDurationSeconds,
+        audioDurationSeconds,
+        isPtt,
         hasComprobantePago: isImage,
         senderName: isFromMe ? undefined : (cleanSender || undefined),
         destinatarioNombre: isFromMe ? (cleanSender || undefined) : undefined,
@@ -1236,6 +1304,15 @@ export async function sendWhatsAppMessageHandler(
         image: buffer,
         caption: text,
       });
+    } else if (mediaDataUrl && mediaDataUrl.startsWith('data:audio/')) {
+      const parts = mediaDataUrl.split(',');
+      const mime = parts[0].match(/:(.*?);/)?.[1] || 'audio/ogg';
+      const buffer = Buffer.from(parts[1], 'base64');
+      sentMsg = await sock.sendMessage(jid, {
+        audio: buffer,
+        mimetype: mime,
+        ptt: true,
+      });
     } else {
       sentMsg = await sock.sendMessage(jid, { text });
     }
@@ -1246,6 +1323,7 @@ export async function sendWhatsAppMessageHandler(
     const myPhone = myPhoneDigits ? `+${myPhoneDigits}` : '+580000000000';
 
     const docId = clientMsgId || messageId;
+    const isOutAudio = mediaDataUrl ? mediaDataUrl.startsWith('data:audio/') : false;
     await saveMessageToFirestore({
       id: docId,
       lineaId,
@@ -1255,8 +1333,9 @@ export async function sendWhatsAppMessageHandler(
       texto: text,
       timestamp: Date.now(),
       estado: 'ENVIADO',
-      tipoMensaje: mediaDataUrl ? 'IMAGEN' : 'TEXTO',
+      tipoMensaje: isOutAudio ? 'AUDIO' : mediaDataUrl ? 'IMAGEN' : 'TEXTO',
       mediaUrl: mediaDataUrl,
+      mediaMimeType: isOutAudio ? 'audio/ogg' : undefined,
       whatsappMessageId: sentMsg?.key?.id,
       destinatarioNombre: cleanContactDisplayName(destinatarioNombre),
     });
@@ -1269,6 +1348,7 @@ export async function sendWhatsAppMessageHandler(
       const myPhoneDigits = rawUser.split(':')[0].split('@')[0].replace(/[^\d]/g, '');
       const myPhone = myPhoneDigits ? `+${myPhoneDigits}` : '+580000000000';
       const cleanDigits = toPhone.replace(/[^\d]/g, '');
+      const isOutAudio = mediaDataUrl ? mediaDataUrl.startsWith('data:audio/') : false;
       await saveMessageToFirestore({
         id: clientMsgId,
         lineaId,
@@ -1278,8 +1358,9 @@ export async function sendWhatsAppMessageHandler(
         texto: text,
         timestamp: Date.now(),
         estado: 'FALLIDO',
-        tipoMensaje: mediaDataUrl ? 'IMAGEN' : 'TEXTO',
+        tipoMensaje: isOutAudio ? 'AUDIO' : mediaDataUrl ? 'IMAGEN' : 'TEXTO',
         mediaUrl: mediaDataUrl,
+        mediaMimeType: isOutAudio ? 'audio/ogg' : undefined,
         destinatarioNombre: cleanContactDisplayName(destinatarioNombre),
         errorDetalle: err.message,
       });
@@ -1612,33 +1693,100 @@ REGLAS OBLIGATORIAS:
         if (worker) {
           const ret = await worker.recognize(imageBuffer);
           const ocrRawText = ret?.data?.text || '';
-          if (ocrRawText.trim().length > 10) {
-            const parsed = parseBankReceiptText(ocrRawText);
-            if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
-              return {
-                success: true,
-                data: {
-                  tipoComprobante: parsed.tipoComprobante,
-                  bancoEmisor: parsed.bancoEmisor,
-                  bancoReceptor: parsed.bancoReceptor,
-                  codigoBancoDestino: parsed.codigoBancoDestino,
-                  fechaComprobante: parsed.fechaComprobante,
-                  horaComprobante: parsed.horaComprobante,
-                  fechaHoraDisplay: parsed.fechaHoraDisplay,
-                  numeroReferencia: parsed.numeroReferencia,
-                  monedaOriginal: parsed.monedaOriginal,
-                  montoOriginal: parsed.montoOriginal,
-                  rifCedula: parsed.rifCedula,
-                  telefonoNombreEmisor: parsed.telefonoNombreEmisor,
-                  cuentaOrigen: parsed.cuentaOrigen,
-                  concepto: parsed.concepto,
-                  consistenciaTipografica: true,
-                  halosDeColor: false,
-                  patronBancarioValido: true,
-                  analisisVisualDetalle: 'Extracción óptica de píxeles mediante Tesseract OCR local con parser bancario nacional.',
-                },
-              };
+          let parsed = ocrRawText.trim().length > 10 ? parseBankReceiptText(ocrRawText) : null;
+
+          // Si falta el monto o es un comprobante en modo oscuro (Y >= 195), ejecutar pasada de alta luminancia
+          if (!parsed || parsed.montoOriginal <= 0) {
+            try {
+              let highLumaBuf: Buffer | null = null;
+              if (
+                imageBuffer.length >= 8 &&
+                imageBuffer[0] === 0x89 &&
+                imageBuffer[1] === 0x50 &&
+                imageBuffer[2] === 0x4e &&
+                imageBuffer[3] === 0x47
+              ) {
+                const { PNG } = await import('pngjs');
+                const png = PNG.sync.read(imageBuffer);
+                const highLumaPng = new PNG({ width: png.width, height: png.height });
+                for (let i = 0; i < png.data.length; i += 4) {
+                  const y = 0.299 * png.data[i] + 0.587 * png.data[i + 1] + 0.114 * png.data[i + 2];
+                  const isHigh =
+                    (png.data[i] >= 190 && png.data[i + 1] >= 190 && png.data[i + 2] >= 190) ||
+                    y >= 195;
+                  if (isHigh) {
+                    highLumaPng.data[i] = 0;
+                    highLumaPng.data[i + 1] = 0;
+                    highLumaPng.data[i + 2] = 0;
+                  } else {
+                    highLumaPng.data[i] = 255;
+                    highLumaPng.data[i + 1] = 255;
+                    highLumaPng.data[i + 2] = 255;
+                  }
+                  highLumaPng.data[i + 3] = 255;
+                }
+                highLumaBuf = PNG.sync.write(highLumaPng);
+              } else if (imageBuffer.length >= 2 && imageBuffer[0] === 0x42 && imageBuffer[1] === 0x4d) {
+                const bmp = await import('bmp-js');
+                const bmpData = bmp.decode(imageBuffer);
+                const highLumaBufData = Buffer.alloc(bmpData.data.length);
+                for (let i = 0; i < bmpData.data.length; i += 4) {
+                  const b = bmpData.data[i + 1];
+                  const g = bmpData.data[i + 2];
+                  const r = bmpData.data[i + 3];
+                  const y = 0.299 * r + 0.587 * g + 0.114 * b;
+                  const isHigh = (r >= 190 && g >= 190 && b >= 190) || y >= 195;
+                  if (isHigh) {
+                    highLumaBufData[i + 1] = 0;
+                    highLumaBufData[i + 2] = 0;
+                    highLumaBufData[i + 3] = 0;
+                  } else {
+                    highLumaBufData[i + 1] = 255;
+                    highLumaBufData[i + 2] = 255;
+                    highLumaBufData[i + 3] = 255;
+                  }
+                  highLumaBufData[i] = 255;
+                }
+                highLumaBuf = bmp.encode({ width: bmpData.width, height: bmpData.height, data: highLumaBufData }).data;
+              }
+
+              if (highLumaBuf) {
+                const retLuma = await worker.recognize(highLumaBuf);
+                const lumaText = retLuma?.data?.text || '';
+                if (lumaText.trim().length > 5) {
+                  const parsedLuma = parseBankReceiptText(lumaText);
+                  parsed = parsed ? mergeReceiptResults(parsed, parsedLuma) : parsedLuma;
+                }
+              }
+            } catch (lumaErr) {
+              console.debug('[OCR Backend] Pase de alta luminancia:', lumaErr);
             }
+          }
+
+          if (parsed && (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia)) {
+            return {
+              success: true,
+              data: {
+                tipoComprobante: parsed.tipoComprobante,
+                bancoEmisor: parsed.bancoEmisor,
+                bancoReceptor: parsed.bancoReceptor,
+                codigoBancoDestino: parsed.codigoBancoDestino,
+                fechaComprobante: parsed.fechaComprobante,
+                horaComprobante: parsed.horaComprobante,
+                fechaHoraDisplay: parsed.fechaHoraDisplay,
+                numeroReferencia: parsed.numeroReferencia,
+                monedaOriginal: parsed.monedaOriginal,
+                montoOriginal: parsed.montoOriginal,
+                rifCedula: parsed.rifCedula,
+                telefonoNombreEmisor: parsed.telefonoNombreEmisor,
+                cuentaOrigen: parsed.cuentaOrigen,
+                concepto: parsed.concepto,
+                consistenciaTipografica: true,
+                halosDeColor: false,
+                patronBancarioValido: true,
+                analisisVisualDetalle: 'Extracción óptica de píxeles mediante Tesseract OCR local con parser bancario nacional y filtro de luminancia.',
+              },
+            };
           }
         }
       } catch (workerErr: any) {

@@ -46,6 +46,19 @@
 5. **Modo Oscuro y Tolerancia Tipográfica:** Reconocimiento de montos con sufijo monetario (`13.201,00 Bs`, `14.082,00 Bs`) y tolerancia a confusiones ópticas (`8s` por `Bs`).
 6. **Compensación Multi-Orientación (0°/90°/180°/270°):** Lectura nativa con Gemini Vision y rotación por Canvas 2D en fallback cliente.
 7. **Calibración de Matriz Forense (Base 100 Puntos):** Todo comprobante bancario legítimo con banco, referencia y monto válidos recibe calificación >= 90% (`AUTENTICO_ALTA_CONFIANZA`), erradicando falsos estados sospechosos (60% u 80%).
-8. **Aislamiento Óptico de Alta Luminancia (Y >= 200):** Para comprobantes en modo oscuro como `PagomóvilBDV Personas`, donde el texto blanco (`#FFFFFF`) se halla dentro de cápsulas o píldoras grises (`~#8E8E93`) sobre fondo negro (`#1C1C1E`). El filtro binariza los píxeles con Y >= 200 a negro puro (`0`) y todo píxel con Y < 200 a blanco puro (`255`), erradicando la píldora y permitiendo a Tesseract leer montos como `13.201,00 Bs` con 100% de nitidez.
+8. **Aislamiento Óptico de Alta Luminancia (Y >= 195) y Prevención de Colapso Bimodal de Otsu:** Para comprobantes en modo oscuro como `PagomóvilBDV Personas`, donde el texto blanco (`#FFFFFF`) se halla dentro de cápsulas o píldoras grises (`~#8E8E93`, Y ~ 138) sobre fondo negro (`#1C1C1E`, Y ~ 28). El filtro binariza los píxeles con alta luminancia (`Y >= 195` o `R >= 190 && G >= 190 && B >= 190`) a negro puro (`0`) y todo píxel con luminancia menor a blanco puro (`255`), erradicando la píldora gris y permitiendo a Tesseract leer montos como `13.201,00 Bs` con 100% de nitidez sin colapso de contraste.
 9. **Extracción y Normalización de Identificación sin Prefijo:** Detección de la etiqueta `Identificación:` con secuencias numéricas de 6 a 9 dígitos (ej. `15235343`), autocompletando y normalizando como `V-15235343` para evitar omisiones `CI/RIF: N/A`.
-10. **Memoria Persistente de Transcripciones OCR:** Registro automático en memoria activa (`Map`) y en `localStorage` indexado por SHA-256 de la imagen, `ocrId` y referencia, prellenando instantáneamente los modales y evitando pérdida de datos ante navegación entre vistas.
+10. **Memoria Persistente e Invalidación Inteligente de Transcripciones OCR:** Registro automático en memoria activa (`Map`) y en `localStorage` indexado por SHA-256 de la imagen, `ocrId` y referencia. Se descartan e invalidan automáticamente registros cacheados corruptos o incompletos con `montoOriginal <= 0`, sin referencia o sin banco emisor, forzando la re-ejecución del motor actualizado.
+
+---
+
+## 5. Arquitectura Multimedia del CRM: Notas de Voz y Mensajes de Audio en WhatsApp
+1. **Desempaquetado y Descarga Binaria:** El listener de Baileys desempaqueta mensajes anidados (`ephemeralMessage`, `viewOnceMessage`, `viewOnceMessageV2`, `documentWithCaptionMessage`) y detecta `audioMessage`.
+2. **Descarga y Data URL Segura:** Descarga el binario completo mediante `downloadMediaMessage`, tipa como `tipoMensaje: 'AUDIO'`, calcula la duración (`audioDurationSeconds`), extrae si es PTT (`isPtt`), y genera un Data URL Base64 con tipo MIME limpio (`audio/ogg`, `audio/mp4`, etc.) respetando el límite seguro de Firestore.
+3. **Erradicación de Burbujas en Blanco:** Si el mensaje de audio no posee texto, se inyecta una etiqueta descriptiva normalizada (`🎤 Nota de voz (MM:SS)` o `🎵 Mensaje de audio (MM:SS)`) para la barra lateral y vistas previas.
+4. **Reproductor Nativo WhatsApp Web con Accesibilidad Táctil:**
+   - Componente React dedicado `WhatsAppAudioMessagePlayer` integrado en la burbuja del chat.
+   - Conversión de Base64 a `Blob URL` en memoria para reproducción fluida e instantánea en navegadores de PC y móviles.
+   - Botón Play/Pause accesible con dimensiones mínimas de 44x44px (`min-w-[44px] min-h-[44px]`).
+   - Scrubber / barra de progreso interactiva con control de tiempo transcurrido y duración total.
+   - Selector rápido de velocidad de reproducción (`1x`, `1.5x`, `2x`).

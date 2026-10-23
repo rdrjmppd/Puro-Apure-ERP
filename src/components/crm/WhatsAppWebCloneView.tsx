@@ -36,6 +36,11 @@ import {
   Zap,
   UserPlus,
   Trash2,
+  Play,
+  Pause,
+  Mic,
+  Volume2,
+  Music,
 } from 'lucide-react';
 import {
   WhatsAppLine,
@@ -73,6 +78,210 @@ function formatChatTime(timestamp?: number): string {
   }
   return `${d.getDate()}/${d.getMonth() + 1}`;
 }
+
+interface WhatsAppAudioMessagePlayerProps {
+  mediaUrl: string;
+  mediaMimeType?: string;
+  durationSeconds?: number;
+  isPtt?: boolean;
+  isOutgoing?: boolean;
+}
+
+const WhatsAppAudioMessagePlayer: React.FC<WhatsAppAudioMessagePlayerProps> = ({
+  mediaUrl,
+  mediaMimeType,
+  durationSeconds,
+  isPtt = true,
+  isOutgoing = false,
+}) => {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [duration, setDuration] = useState<number>(durationSeconds || 0);
+  const [speed, setSpeed] = useState<number>(1);
+  const [blobUrl, setBlobUrl] = useState<string>('');
+
+  useEffect(() => {
+    if (!mediaUrl) return;
+    let url = mediaUrl;
+    let created = false;
+
+    if (mediaUrl.startsWith('data:')) {
+      try {
+        const parts = mediaUrl.split(',');
+        const mimeMatch = parts[0].match(/:(.*?);/);
+        const mime = mimeMatch ? mimeMatch[1] : mediaMimeType || 'audio/ogg';
+        const bstr = atob(parts[1]);
+        let n = bstr.length;
+        const u8arr = new Uint8Array(n);
+        while (n--) {
+          u8arr[n] = bstr.charCodeAt(n);
+        }
+        const blob = new Blob([u8arr], { type: mime });
+        url = URL.createObjectURL(blob);
+        created = true;
+      } catch (err) {
+        url = mediaUrl;
+      }
+    }
+
+    setBlobUrl(url);
+
+    return () => {
+      if (created) URL.revokeObjectURL(url);
+    };
+  }, [mediaUrl, mediaMimeType]);
+
+  const togglePlay = () => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      audioRef.current
+        .play()
+        .then(() => setIsPlaying(true))
+        .catch((err) => {
+          console.warn('[AudioPlayer] Error al reproducir audio:', err);
+          setIsPlaying(false);
+        });
+    }
+  };
+
+  const handleTimeUpdate = () => {
+    if (audioRef.current) {
+      setCurrentTime(audioRef.current.currentTime);
+      if (
+        audioRef.current.duration &&
+        !isNaN(audioRef.current.duration) &&
+        isFinite(audioRef.current.duration)
+      ) {
+        setDuration(audioRef.current.duration);
+      }
+    }
+  };
+
+  const handleLoadedMetadata = () => {
+    if (
+      audioRef.current &&
+      audioRef.current.duration &&
+      !isNaN(audioRef.current.duration) &&
+      isFinite(audioRef.current.duration)
+    ) {
+      setDuration(audioRef.current.duration);
+    }
+  };
+
+  const handleEnded = () => {
+    setIsPlaying(false);
+    setCurrentTime(0);
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0;
+    }
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newTime = parseFloat(e.target.value);
+    setCurrentTime(newTime);
+    if (audioRef.current) {
+      audioRef.current.currentTime = newTime;
+    }
+  };
+
+  const toggleSpeed = () => {
+    const nextSpeed = speed === 1 ? 1.5 : speed === 1.5 ? 2 : 1;
+    setSpeed(nextSpeed);
+    if (audioRef.current) {
+      audioRef.current.playbackRate = nextSpeed;
+    }
+  };
+
+  const formatTime = (secs: number): string => {
+    if (!secs || isNaN(secs) || secs < 0) return '0:00';
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60)
+      .toString()
+      .padStart(2, '0');
+    return `${m}:${s}`;
+  };
+
+  return (
+    <div
+      className={`p-2.5 rounded-xl border flex flex-col gap-2 min-w-[240px] max-w-[320px] transition select-none ${
+        isOutgoing
+          ? 'bg-purple-900/60 border-purple-500/40 text-purple-100'
+          : 'bg-slate-950/80 border-slate-700/80 text-slate-200'
+      }`}
+    >
+      <audio
+        ref={audioRef}
+        src={blobUrl || mediaUrl}
+        onTimeUpdate={handleTimeUpdate}
+        onLoadedMetadata={handleLoadedMetadata}
+        onEnded={handleEnded}
+        preload="metadata"
+      />
+
+      {/* Cabecera: Ícono de micrófono / audio y duración */}
+      <div className="flex items-center justify-between text-[11px] font-medium opacity-90">
+        <div className="flex items-center gap-1.5">
+          {isPtt ? (
+            <Mic className="w-3.5 h-3.5 text-emerald-400" />
+          ) : (
+            <Music className="w-3.5 h-3.5 text-cyan-400" />
+          )}
+          <span>{isPtt ? 'Nota de voz' : 'Mensaje de audio'}</span>
+        </div>
+        <button
+          type="button"
+          onClick={toggleSpeed}
+          className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-white/10 hover:bg-white/20 transition cursor-pointer min-h-[24px]"
+        >
+          {speed}x
+        </button>
+      </div>
+
+      {/* Control Principal: Botón Play/Pause (>=44x44px) y Barra de Progreso */}
+      <div className="flex items-center gap-2.5">
+        <button
+          type="button"
+          onClick={togglePlay}
+          className={`w-11 h-11 min-w-[44px] min-h-[44px] rounded-full flex items-center justify-center shadow transition cursor-pointer shrink-0 ${
+            isOutgoing
+              ? 'bg-white text-purple-800 hover:bg-purple-100 shadow-purple-950/40'
+              : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-950/40'
+          }`}
+          aria-label={isPlaying ? 'Pausar audio' : 'Reproducir audio'}
+        >
+          {isPlaying ? (
+            <Pause className="w-5 h-5 fill-current" />
+          ) : (
+            <Play className="w-5 h-5 fill-current translate-x-0.5" />
+          )}
+        </button>
+
+        {/* Barra interactiva de desplazamiento / scrubber */}
+        <div className="flex-1 flex flex-col justify-center gap-1">
+          <div className="relative w-full flex items-center">
+            <input
+              type="range"
+              min={0}
+              max={duration || 1}
+              step={0.1}
+              value={currentTime}
+              onChange={handleSeek}
+              className="w-full h-1.5 rounded-lg appearance-none cursor-pointer bg-slate-700/60 accent-emerald-400 focus:outline-none"
+            />
+          </div>
+          <div className="flex justify-between items-center text-[10px] font-mono opacity-75">
+            <span>{formatTime(currentTime)}</span>
+            <span>{formatTime(duration)}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
   entities,
@@ -475,7 +684,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     }
   };
 
-  // Adjuntar imagen (comprobante)
+  // Adjuntar imagen o nota de voz/audio
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !selectedContactPhone) return;
@@ -488,6 +697,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
       return;
     }
 
+    const isAudio = file.type.startsWith('audio/');
     const reader = new FileReader();
     reader.onload = async () => {
       const dataUri = reader.result as string;
@@ -495,8 +705,8 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
         activeLineId,
         activeLine.numeroTelefono || '',
         selectedContactPhone,
-        `[Adjunto: ${file.name}]`,
-        'IMAGEN',
+        isAudio ? `🎤 Nota de voz (${file.name})` : `[Adjunto: ${file.name}]`,
+        isAudio ? 'AUDIO' : 'IMAGEN',
         dataUri,
         file.type
       );
@@ -963,7 +1173,12 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                               <Receipt className="w-3.5 h-3.5 text-emerald-400 shrink-0 inline" />
                             )}
                             <span className="truncate">
-                              {contact.ultimoMensaje.texto || (contact.ultimoMensaje.tipoMensaje === 'IMAGEN' ? '📷 Imagen / Comprobante' : '')}
+                              {contact.ultimoMensaje.texto ||
+                                (contact.ultimoMensaje.tipoMensaje === 'IMAGEN'
+                                  ? '📷 Imagen / Comprobante'
+                                  : contact.ultimoMensaje.tipoMensaje === 'AUDIO'
+                                  ? '🎤 Nota de voz'
+                                  : '')}
                             </span>
                           </p>
                           {contact.mensajesNoLeidos && contact.mensajesNoLeidos > 0 ? (
@@ -1094,38 +1309,63 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                               : 'bg-slate-900 text-slate-200 border border-slate-800 rounded-tl-none'
                           }`}
                         >
-                          {/* Adjunto de Imagen / Comprobante */}
-                          {msg.mediaUrl && (
-                            <div className="mb-2 rounded-xl overflow-hidden border border-slate-700 bg-slate-950">
-                              <img
-                                src={msg.mediaUrl}
-                                alt="Evidencia de Pago"
-                                className="w-full max-h-60 object-contain"
-                              />
-                              {/* Botón Disparo Directo a OCR */}
-                              <div className="p-2 bg-slate-900 flex items-center justify-between gap-2 border-t border-slate-800">
-                                <span className="text-[10px] text-slate-400 font-mono">
-                                  Evidencia de Pago Recibida
-                                </span>
-                                <button
-                                  onClick={() => {
-                                    if (onAnalyzeReceiptOCR && msg.mediaUrl) {
-                                      onAnalyzeReceiptOCR(msg.mediaUrl, selectedContact);
-                                    }
-                                  }}
-                                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 shadow transition cursor-pointer min-h-[32px]"
-                                >
-                                  <Sparkles className="w-3 h-3" />
-                                  <span>🔍 Analizar con OCR</span>
-                                </button>
+                          {/* Adjunto de Audio / Nota de Voz */}
+                          {(msg.tipoMensaje === 'AUDIO' ||
+                            msg.mediaMimeType?.startsWith('audio/') ||
+                            msg.mediaUrl?.startsWith('data:audio/')) &&
+                            msg.mediaUrl && (
+                              <div className="mb-2">
+                                <WhatsAppAudioMessagePlayer
+                                  mediaUrl={msg.mediaUrl}
+                                  mediaMimeType={msg.mediaMimeType}
+                                  durationSeconds={msg.audioDurationSeconds || msg.audioDuration}
+                                  isPtt={msg.isPtt}
+                                  isOutgoing={isOutgoing}
+                                />
                               </div>
-                            </div>
-                          )}
+                            )}
 
-                          {/* Texto del Mensaje */}
-                          <p className="text-xs whitespace-pre-wrap leading-relaxed font-sans">
-                            {msg.texto}
-                          </p>
+                          {/* Adjunto de Imagen / Comprobante */}
+                          {msg.mediaUrl &&
+                            (msg.tipoMensaje === 'IMAGEN' ||
+                              msg.mediaUrl.startsWith('data:image/')) && (
+                              <div className="mb-2 rounded-xl overflow-hidden border border-slate-700 bg-slate-950">
+                                <img
+                                  src={msg.mediaUrl}
+                                  alt="Evidencia de Pago"
+                                  className="w-full max-h-60 object-contain"
+                                />
+                                {/* Botón Disparo Directo a OCR */}
+                                <div className="p-2 bg-slate-900 flex items-center justify-between gap-2 border-t border-slate-800">
+                                  <span className="text-[10px] text-slate-400 font-mono">
+                                    Evidencia de Pago Recibida
+                                  </span>
+                                  <button
+                                    onClick={() => {
+                                      if (onAnalyzeReceiptOCR && msg.mediaUrl) {
+                                        onAnalyzeReceiptOCR(msg.mediaUrl, selectedContact);
+                                      }
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold flex items-center gap-1 shadow transition cursor-pointer min-h-[32px]"
+                                  >
+                                    <Sparkles className="w-3 h-3" />
+                                    <span>🔍 Analizar con OCR</span>
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                          {/* Texto del Mensaje (ocultar si es solo la etiqueta técnica del audio y ya se renderizó el reproductor) */}
+                          {!(
+                            (msg.tipoMensaje === 'AUDIO' ||
+                              msg.mediaUrl?.startsWith('data:audio/')) &&
+                            msg.mediaUrl &&
+                            (msg.texto?.startsWith('🎤') || msg.texto?.startsWith('🎵'))
+                          ) && (
+                            <p className="text-xs whitespace-pre-wrap leading-relaxed font-sans">
+                              {msg.texto}
+                            </p>
+                          )}
 
                           {/* Pie de Mensaje: Hora y Ticks de Entrega */}
                           <div
@@ -1193,7 +1433,7 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
                   <Paperclip className="w-4 h-4" />
                   <input
                     type="file"
-                    accept="image/*,.pdf"
+                    accept="image/*,audio/*,.pdf"
                     onChange={handleFileUpload}
                     className="hidden"
                   />

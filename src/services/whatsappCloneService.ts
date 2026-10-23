@@ -520,7 +520,8 @@ export class WhatsAppCloneService {
     tipoMensaje: WhatsAppMessage['tipoMensaje'] = 'TEXTO',
     mediaUrl?: string,
     mediaMimeType?: string,
-    destinatarioNombre?: string
+    destinatarioNombre?: string,
+    audioDuration?: number
   ): Promise<{ success: boolean; messageId: string; error?: string }> {
     const msgId = `WAM-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const now = Date.now();
@@ -548,6 +549,11 @@ export class WhatsAppCloneService {
     }
     if (mediaMimeType) {
       message.mediaMimeType = mediaMimeType;
+    }
+    if (audioDuration) {
+      message.audioDuration = audioDuration;
+      message.audioDurationSeconds = audioDuration;
+      message.isPtt = true;
     }
 
     const cleanMessage = sanitizeFirestorePayload(message);

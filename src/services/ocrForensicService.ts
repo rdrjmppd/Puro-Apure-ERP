@@ -441,27 +441,53 @@ export function saveTranscriptionToMemory(payment: PagoReportadoOCR): void {
 
 /**
  * Recupera una transcripción guardada previamente por su SHA-256, ID o Número de Referencia
+ * Descarta e invalida automáticamente transcripciones incompletas (sin monto > 0, sin referencia o sin banco emisor)
  */
 export function getTranscriptionFromMemory(identifier: string): PagoReportadoOCR | null {
   if (!identifier) return null;
+
+  const isCompleteAndValid = (p: PagoReportadoOCR): boolean => {
+    return Boolean(
+      p &&
+      p.montoOriginal &&
+      p.montoOriginal > 0 &&
+      p.numeroReferencia &&
+      p.bancoEmisor
+    );
+  };
+
   if (ocrMemoryCache.has(identifier)) {
-    return ocrMemoryCache.get(identifier)!;
+    const memItem = ocrMemoryCache.get(identifier)!;
+    if (isCompleteAndValid(memItem)) {
+      return memItem;
+    } else {
+      // Invalida caché corrupta o incompleta
+      ocrMemoryCache.delete(identifier);
+    }
   }
+
   if (typeof window !== 'undefined' && window.localStorage) {
     try {
       const stored = localStorage.getItem(OCR_TRANSCRIPTIONS_KEY);
       if (stored) {
         const list: PagoReportadoOCR[] = JSON.parse(stored);
-        const match = list.find(
+        const matchIndex = list.findIndex(
           (p) =>
             p.id === identifier ||
             p.sha256Bytes === identifier ||
             p.numeroReferencia === identifier ||
             p.referenciaNormalizada === identifier
         );
-        if (match) {
-          ocrMemoryCache.set(identifier, match);
-          return match;
+        if (matchIndex !== -1) {
+          const match = list[matchIndex];
+          if (isCompleteAndValid(match)) {
+            ocrMemoryCache.set(identifier, match);
+            return match;
+          } else {
+            // Purgar elemento corrupto de localStorage
+            list.splice(matchIndex, 1);
+            localStorage.setItem(OCR_TRANSCRIPTIONS_KEY, JSON.stringify(list));
+          }
         }
       }
     } catch {}
@@ -519,11 +545,14 @@ export async function preprocessOrRotateImage(
             }
           } else if (actualFilter === 'high_luminance_isolation') {
             // Aislamiento de Alta Luminancia (Canal B - Especial para Píldoras Grises en Modo Oscuro BDV):
-            // Letras blancas (#FFFFFF, Y >= 200) -> Negro Puro (0, 0, 0)
+            // Letras blancas (#FFFFFF, Y >= 190 / R>=190 & G>=190 & B>=190) -> Negro Puro (0, 0, 0)
             // Píldora gris (~#8E8E93, Y ~ 140) y Fondo negro (#1C1C1E, Y ~ 30) -> Blanco Puro (255, 255, 255)
             for (let i = 0; i < d.length; i += 4) {
               const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-              if (y >= 200) {
+              const isHigh =
+                (d[i] >= 190 && d[i + 1] >= 190 && d[i + 2] >= 190) ||
+                y >= 195;
+              if (isHigh) {
                 d[i] = 0;
                 d[i + 1] = 0;
                 d[i + 2] = 0;
@@ -770,6 +799,7 @@ export class OcrForensicService {
     analisisVisualDetalle: string;
   }> {
     // 1. Intentar vía endpoint proxy seguro del backend (/api/ocr-analyze)
+    let backendData: any = null;
     if (typeof window !== 'undefined') {
       try {
         const resp = await fetch('/api/ocr-analyze', {
@@ -781,7 +811,9 @@ export class OcrForensicService {
           const resJson = await resp.json();
           if (resJson.success && resJson.data) {
             const d = resJson.data;
-            if (d.bancoEmisor || d.numeroReferencia || Number(d.montoOriginal) > 0) {
+            const parsedMonto = parseVenezuelanOrInternationalAmount(String(d.montoOriginal || 0));
+            // Si el backend extrajo monto mayor a cero y datos válidos, retornar de inmediato
+            if (parsedMonto > 0 && (d.bancoEmisor || d.numeroReferencia)) {
               return {
                 tipoComprobante: d.tipoComprobante || 'PAGO_MOVIL',
                 bancoEmisor: d.bancoEmisor || '',
@@ -792,7 +824,7 @@ export class OcrForensicService {
                 fechaHoraDisplay: d.fechaHoraDisplay || d.fechaComprobante,
                 numeroReferencia: String(d.numeroReferencia || '').replace(/[^0-9A-Za-z]/g, ''),
                 monedaOriginal: d.monedaOriginal === 'USD' ? 'USD' : 'VES',
-                montoOriginal: parseVenezuelanOrInternationalAmount(String(d.montoOriginal || 0)),
+                montoOriginal: parsedMonto,
                 rifCedula: d.rifCedula || '',
                 telefonoNombreEmisor: d.telefonoNombreEmisor || '',
                 cuentaOrigen: d.cuentaOrigen || '',
@@ -802,6 +834,9 @@ export class OcrForensicService {
                 patronBancarioValido: d.patronBancarioValido ?? true,
                 analisisVisualDetalle: d.analisisVisualDetalle || 'Comprobante analizado con peritaje multimodal.',
               };
+            } else if (d.bancoEmisor || d.numeroReferencia) {
+              // Guardar datos parciales del backend para fusionar tras pasada local
+              backendData = d;
             }
           }
         }
@@ -827,7 +862,7 @@ export class OcrForensicService {
       // Si falta monto, referencia o beneficiario, ejecutar Canal B (Aislamiento de Alta Luminancia) y transformaciones
       if (!parsed.esComprobanteValido || parsed.montoOriginal <= 0 || !parsed.numeroReferencia || !parsed.rifCedula) {
         const passes: { angle: 0 | 90 | 180 | 270; filter: PreprocessFilter }[] = [
-          // Canal B: Aislamiento de texto blanco sobre píldora gris en modo oscuro (Y >= 200)
+          // Canal B: Aislamiento de texto blanco sobre píldora gris en modo oscuro (Y >= 195)
           { angle: 0, filter: 'high_luminance_isolation' },
           // Inversión estándar
           { angle: 0, filter: 'invert' },
@@ -851,6 +886,33 @@ export class OcrForensicService {
             }
           } catch (_) {}
         }
+      }
+
+      // Si teníamos datos parciales del backend, fusionar asegurando que el monto extraído prevalezca
+      if (backendData) {
+        parsed = mergeReceiptResults(
+          {
+            tipoComprobante: backendData.tipoComprobante || 'PAGO_MOVIL',
+            bancoEmisor: backendData.bancoEmisor || '',
+            bancoReceptor: backendData.bancoReceptor || '',
+            codigoBancoDestino: backendData.codigoBancoDestino || '',
+            numeroReferencia: backendData.numeroReferencia || '',
+            montoOriginal: parseVenezuelanOrInternationalAmount(String(backendData.montoOriginal || 0)),
+            monedaOriginal: backendData.monedaOriginal === 'USD' ? 'USD' : 'VES',
+            fechaComprobante: backendData.fechaComprobante || getCaracasToday(),
+            horaComprobante: backendData.horaComprobante || '',
+            fechaHoraDisplay: backendData.fechaHoraDisplay || '',
+            rifCedula: backendData.rifCedula || '',
+            telefonoNombreEmisor: backendData.telefonoNombreEmisor || '',
+            cuentaOrigen: backendData.cuentaOrigen || '',
+            concepto: backendData.concepto || '',
+            indicadoresManipulacionVisual: [],
+            anomaliasEstructurales: [],
+            confianzaExtraccion: 90,
+            esComprobanteValido: true,
+          },
+          parsed
+        );
       }
       if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
         return {

@@ -12,7 +12,13 @@ export type WhatsAppConnectionStatus =
   | 'ERROR';
 export type WhatsAppMessageDirection = 'ENTRANTE' | 'SALIENTE';
 export type WhatsAppMessageStatus = 'ENVIADO' | 'ENTREGADO' | 'LEIDO' | 'FALLIDO';
-export type WhatsAppMessageType = 'TEXTO' | 'IMAGEN' | 'DOCUMENTO_PDF';
+export type WhatsAppMessageType =
+  | 'TEXTO'
+  | 'IMAGEN'
+  | 'DOCUMENTO'
+  | 'DOCUMENTO_PDF'
+  | 'AUDIO'
+  | 'PLANTILLA';
 
 export interface WhatsAppLine {
   id: string; // ej. 'linea_cobranzas', 'linea_ventas', 'linea_brm'
@@ -41,6 +47,9 @@ export interface WhatsAppMessage {
   tipoMensaje: WhatsAppMessageType;
   mediaUrl?: string;
   mediaMimeType?: string;
+  audioDuration?: number;
+  audioDurationSeconds?: number;
+  isPtt?: boolean;
   hasComprobantePago?: boolean;
   ocrStatus?: 'NO_ANALIZADO' | 'PENDIENTE' | 'ANALIZADO';
   ocrPagoId?: string;

@@ -453,22 +453,24 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
     }
   }
 
-  // 4. MONTO ORIGINAL Y MONEDA (Multilínea tolerante, sufijos "Bs", "8s" y modo oscuro)
+  // 4. MONTO ORIGINAL Y MONEDA (Multilínea tolerante, sufijos "Bs", "8s", modo oscuro y posicional BDV)
   let montoOriginal = 0;
 
   const cleanAmountCandidate = (raw: string): number => {
     if (!raw) return 0;
-    // Normalizar lecturas de Tesseract en modo oscuro donde "Bs" se confunde con "8s", "b5", "es", "ds" o "$s"
+    // Normalizar lecturas de Tesseract en modo oscuro donde "Bs" se confunde con "8s", "b5", "B5", "es", "Es", "ds", "6s", "Os" o "$s"
     const sanitized = raw
       .replace(/\b8s\b/gi, 'Bs')
       .replace(/\bb5\b/gi, 'Bs')
       .replace(/\bes\b/gi, 'Bs')
       .replace(/\bds\b/gi, 'Bs')
+      .replace(/\b6s\b/gi, 'Bs')
+      .replace(/\bOs\b/gi, 'Bs')
       .replace(/\$s\b/gi, 'Bs');
     return parseVenezuelanOrInternationalAmount(sanitized);
   };
 
-  // 1. Multilínea tolerante para etiquetas de monto (ej. "Monto (Bs.):\n44.238,00" o "MONTO DE LA OPERACIÓN:\nBs. 8.833,96")
+  // 1. Multilínea tolerante para etiquetas explícitas de monto (ej. "Monto (Bs.):\n44.238,00" o "MONTO DE LA OPERACIÓN:\nBs. 8.833,96")
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (
@@ -502,12 +504,36 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
     }
   }
 
-  // 1.5 Escaneo línea a línea de montos aislados (ej. en BDV modo oscuro donde el monto "13.201,00 Bs" aparece en su propia línea)
+  // 1.5 Regla Posicional para Banco de Venezuela / PagomóvilBDV sin etiqueta "Monto"
+  // En comprobantes BDV (modo claro u oscuro), el monto (ej. "13.201,00 Bs" o "13.201,00") aparece en el bloque
+  // superior (antes de Fecha: u Operación:), muchas veces sin etiqueta previa.
+  const isBdvReceipt = /banco\s*de\s*venezuela|pagom[oó]vilbdv|pago\s*clave|\bbdv\b/i.test(text);
+  if (montoOriginal === 0 && isBdvReceipt) {
+    // Buscar en las primeras 7 líneas o antes de "Fecha:"
+    for (let i = 0; i < Math.min(lines.length, 8); i++) {
+      const line = lines[i].trim();
+      if (/fecha|operaci[oó]n|referencia|identificaci[oó]n/i.test(line)) {
+        // Si la línea contiene la fecha u operación, no evaluar más allá
+        break;
+      }
+      // Coincidencia con sufijo monetario flexible (ej. "13.201,00 Bs", "13.201,00 8s", "14.082,00 Bs")
+      const bdvWithSuffix = line.match(/([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})\s*(?:bs\.?|ves|8s|b5|es|ds|6s|Os|bol[ií]vares|s\b)?/i);
+      if (bdvWithSuffix && bdvWithSuffix[1]) {
+        const val = cleanAmountCandidate(bdvWithSuffix[1]);
+        if (val > 0) {
+          montoOriginal = val;
+          break;
+        }
+      }
+    }
+  }
+
+  // 1.8 Escaneo de montos aislados o en líneas independientes (con o sin etiqueta)
   if (montoOriginal === 0) {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
-      // Línea con monto venezolano aislado, con o sin sufijo de moneda
-      const matchStandalone = line.match(/^([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})(?:\s*(?:bs\.?|ves|8s|b5|es|ds|bol[ií]vares))?$/i);
+      // Línea con monto venezolano con o sin sufijo de moneda flexible
+      const matchStandalone = line.match(/(?:^|\s)([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})(?:\s*(?:bs\.?|ves|8s|b5|es|ds|6s|Os|bol[ií]vares|s\b))?(?:\s|$)/i);
       if (matchStandalone && matchStandalone[1]) {
         const val = cleanAmountCandidate(matchStandalone[1]);
         if (val > 0) {
@@ -518,13 +544,13 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
     }
   }
 
-  // 2. Patrones directos con prefijo o sufijo de moneda (incluyendo Tesseract "8s" por "Bs")
+  // 2. Patrones directos con prefijo o sufijo de moneda (incluyendo Tesseract "8s", "B5", "es", "6s", "Os", "s" por "Bs")
   if (montoOriginal === 0) {
     const directPatterns = [
-      // Sufijo venezolano: "13.201,00 Bs", "14.082,00 Bs", "13.201,00 8s", "44.238,00 VES"
-      /([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})\s*(?:bs\.?|ves|8s|bol[ií]vares)\b/i,
+      // Sufijo venezolano: "13.201,00 Bs", "14.082,00 Bs", "13.201,00 8s", "44.238,00 VES", "13.201,00 s"
+      /([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})\s*(?:bs\.?|ves|8s|b5|es|ds|6s|os|bol[ií]vares|s\b)/i,
       // Prefijo venezolano: "Bs. 44.238,00", "Bs 13.201,00", "8s. 14.082,00"
-      /(?:bs\.?|ves|8s|bol[ií]vares)[:\s]*([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})/i,
+      /(?:bs\.?|ves|8s|b5|es|ds|6s|os|bol[ií]vares)[:\s]*([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})/i,
       // Sufijo USD: "50.00 USD", "49.92 $"
       /([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})\s*(?:usd|\$)/i,
       // Prefijo USD: "$ 50.00", "USD 49.92"
