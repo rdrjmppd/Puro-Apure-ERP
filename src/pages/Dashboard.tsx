@@ -24,10 +24,10 @@ import { FinanceService } from '../services/financeService';
 import { DualEntity, BillingInvoice } from '../types/finance';
 
 const WhatsAppWebCloneView = React.lazy(() =>
-  import('../components/crm/WhatsAppWebCloneView').then((m) => ({ default: m.WhatsAppWebCloneView }))
+  import('../components/crm/WhatsAppWebCloneView').then((m) => ({ default: m.default || m.WhatsAppWebCloneView }))
 );
 const LectorComprobanteOCRModal = React.lazy(() =>
-  import('../components/finanzas/LectorComprobanteOCRModal').then((m) => ({ default: m.LectorComprobanteOCRModal }))
+  import('../components/finanzas/LectorComprobanteOCRModal').then((m) => ({ default: m.default || m.LectorComprobanteOCRModal }))
 );
 import {
   LogOut,

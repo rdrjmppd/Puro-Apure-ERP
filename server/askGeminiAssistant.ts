@@ -151,19 +151,23 @@ export async function askGeminiAssistantHandler(
   }
 
   // Verificación de clave de API
-  const apiKey =
-    process.env.GEMINI_API_KEY ||
-    process.env.VITE_GEMINI_API_KEY ||
-    'AQ.Ab8RN6IbKcoTjWc6NkNPO15jZ4YTyWTkmakH9uvI5jJ8RLLXLQ';
-  if (!apiKey) {
+  const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
+  const hasValidApiKey = Boolean(apiKey && apiKey.startsWith('AIzaSy') && apiKey.length >= 35);
+  if (!hasValidApiKey) {
     return {
       success: true,
       reply: generateLocalDomainFallback(cleanMessage, currentModule, userRole, pantallaActual),
+      mode: 'local_fallback',
     };
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: { 'User-Agent': 'aistudio-build' },
+      },
+    });
     const systemInstruction = buildFabiSystemPrompt(userRole, currentModule);
 
     // Mapear historial al formato de la API de Gemini

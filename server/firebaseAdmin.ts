@@ -21,7 +21,9 @@ try {
 
 // Bandera DevSecOps: Determina si el entorno cuenta con credenciales administrativas para llamadas gRPC
 export const hasAdminCredentials = Boolean(
-  serviceAccount || process.env.GOOGLE_APPLICATION_CREDENTIALS
+  serviceAccount ||
+    (process.env.GOOGLE_APPLICATION_CREDENTIALS &&
+      fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS))
 );
 
 let configJson: any = null;

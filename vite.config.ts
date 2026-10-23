@@ -19,6 +19,10 @@ import {
   verifyAuthToken,
   getLineContactsHandler,
   autoRestoreExistingSessions,
+  getPendingMessages,
+  acknowledgePendingMessages,
+  getPendingOcrQueue,
+  acknowledgePendingOcr,
 } from './server/whatsappQrBridge';
 
 function bcvServerProxyPlugin(): Plugin {
@@ -31,7 +35,7 @@ function bcvServerProxyPlugin(): Plugin {
       });
 
       // Verificación de integridad del branding: siembra el logo oficial o migra documentos heredados (con respaldo)
-      ensureBrandingIntegrity();
+      ensureBrandingIntegrity().catch(() => {});
 
       // Auto-restaurar sesiones de WhatsApp existentes en segundo plano
       autoRestoreExistingSessions().catch((err) => {
@@ -439,6 +443,54 @@ function bcvServerProxyPlugin(): Plugin {
         const contacts = getLineContactsHandler(lineaId);
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ success: true, contacts }));
+      });
+
+      // 5. Endpoint /api/whatsapp/offline-queue (Sincronización tolerante a desconexión y cliente-first)
+      server.middlewares.use('/api/whatsapp/offline-queue', async (req: any, res: any) => {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        const reqUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost:3000'}`);
+        const lineaId = reqUrl.searchParams.get('lineaId') || undefined;
+
+        if (req.method === 'GET') {
+          const pendingMessages = getPendingMessages(lineaId);
+          const pendingOcr = getPendingOcrQueue();
+          res.setHeader('Content-Type', 'application/json');
+          res.end(
+            JSON.stringify({
+              success: true,
+              pendingMessages,
+              pendingOcr,
+            })
+          );
+          return;
+        }
+
+        if (req.method === 'POST') {
+          let body = '';
+          req.on('data', (chunk: any) => (body += chunk));
+          req.on('end', () => {
+            try {
+              const parsed = body ? JSON.parse(body) : {};
+              if (Array.isArray(parsed.messageIds) && parsed.messageIds.length > 0) {
+                acknowledgePendingMessages(parsed.messageIds);
+              }
+              if (Array.isArray(parsed.ocrIds) && parsed.ocrIds.length > 0) {
+                acknowledgePendingOcr(parsed.ocrIds);
+              }
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ success: true }));
+            } catch (e: any) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ success: false, error: e.message }));
+            }
+          });
+          return;
+        }
+
+        res.statusCode = 405;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: false, error: 'Method Not Allowed' }));
       });
     },
   };

@@ -3,7 +3,6 @@
  * Cumple con los 4 Candados de Veracidad y la Separación Estricta entre Pre-Conciliación y Verdad Contable.
  */
 
-import { GoogleGenAI } from '@google/genai';
 import {
   collection,
   doc,
@@ -444,88 +443,7 @@ export class OcrForensicService {
       }
     }
 
-    // 2. Intentar vía SDK cliente directo si existe clave en el bundle o entorno (incluyendo claves AQ. de AI Studio)
-    const apiKey =
-      (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GEMINI_API_KEY) ||
-      (typeof process !== 'undefined' && (process.env?.VITE_GEMINI_API_KEY || process.env?.GEMINI_API_KEY)) ||
-      '';
-
-    if (apiKey && apiKey.trim().length > 10) {
-      const candidateModels = [
-        'gemini-2.5-flash',
-        'gemini-3.8-flash',
-        'gemini-3.5-flash-lite',
-        'gemini-2.0-flash',
-        'gemini-1.5-flash',
-      ];
-      for (const model of candidateModels) {
-        try {
-          const ai = new GoogleGenAI({ apiKey: apiKey.trim() });
-          const prompt = `Actúa como un Perito Forense Documental y Lector OCR para Comprobantes de Pago en Venezuela (Pago Móvil, Transferencia, Zelle, Binance, Criptoactivos).
-Analiza meticulosamente la imagen adjunta y extrae en formato estrictamente JSON:
-{
-  "tipoComprobante": "PAGO_MOVIL" | "TRANSFERENCIA" | "ZELLE" | "CRIPTOACTIVOS" | "RETENCION_FISCAL" | "RIF",
-  "bancoEmisor": "Nombre del banco emisor o plataforma (ej. Bancamiga, Banesco, Mercantil, BDV, BNC, Provincial, etc.)",
-  "bancoReceptor": "Nombre del banco receptor (ej. Banco de Venezuela, Banesco, etc.)",
-  "fechaComprobante": "YYYY-MM-DD",
-  "numeroReferencia": "Solo dígitos o alfanumérico de referencia (ej. 112338509503)",
-  "monedaOriginal": "VES" | "USD",
-  "montoOriginal": 0.00,
-  "rifCedula": "Cédula o RIF detectado (ej. V-11083828 o J-12345678-0)",
-  "telefonoNombreEmisor": "Teléfono o concepto asociado (ej. 04145057900)",
-  "consistenciaTipografica": true o false,
-  "halosDeColor": true o false,
-  "patronBancarioValido": true o false,
-  "analisisVisualDetalle": "Resumen conciso del peritaje forense"
-}
-IMPORTANTE: Si el monto está en formato venezolano con punto de miles y coma de decimales (ej. Bs. 8.833,96), conviértelo a número flotante 8833.96. Prohibido inventar datos si no son legibles.`;
-
-          const response: any = await ai.models.generateContent({
-            model,
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  {
-                    inlineData: {
-                      mimeType: mimeType || 'image/jpeg',
-                      data: base64Clean,
-                    },
-                  },
-                  { text: prompt },
-                ],
-              },
-            ],
-            config: {
-              temperature: 0.1,
-              responseMimeType: 'application/json',
-            },
-          });
-
-          const text = response.text || '';
-          const parsed = JSON.parse(text);
-          return {
-            tipoComprobante: parsed.tipoComprobante || heuristic.tipoComprobante || 'PAGO_MOVIL',
-            bancoEmisor: parsed.bancoEmisor || heuristic.bancoEmisor || '',
-            bancoReceptor: parsed.bancoReceptor || heuristic.bancoReceptor || '',
-            fechaComprobante: parsed.fechaComprobante || heuristic.fechaComprobante || new Date().toISOString().split('T')[0],
-            numeroReferencia: String(parsed.numeroReferencia || heuristic.numeroReferencia || '').replace(/[^0-9A-Za-z]/g, ''),
-            monedaOriginal: parsed.monedaOriginal === 'USD' || heuristic.monedaOriginal === 'USD' ? 'USD' : 'VES',
-            montoOriginal: Number(parsed.montoOriginal) || heuristic.montoOriginal || 0,
-            rifCedula: parsed.rifCedula || heuristic.rifCedula || '',
-            telefonoNombreEmisor: parsed.telefonoNombreEmisor || heuristic.telefonoNombreEmisor || '',
-            consistenciaTipografica: parsed.consistenciaTipografica ?? true,
-            halosDeColor: parsed.halosDeColor ?? false,
-            patronBancarioValido: parsed.patronBancarioValido ?? true,
-            analisisVisualDetalle: parsed.analisisVisualDetalle || `Comprobante analizado con ${model}.`,
-          };
-        } catch (e) {
-          console.warn(`[OcrForensicService] Error con modelo ${model}:`, e);
-        }
-      }
-    }
-
-    // 3. Fallback Heurístico Determinista de Alta Precisión si el comprobante tiene datos legibles
+    // 2. Fallback Heurístico Determinista de Alta Precisión si el comprobante tiene datos legibles (modo local offline)
     if (heuristic.hasData) {
       return {
         tipoComprobante: heuristic.tipoComprobante || 'PAGO_MOVIL',

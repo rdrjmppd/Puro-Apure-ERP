@@ -246,10 +246,17 @@ export async function ensureBrandingIntegrity(): Promise<void> {
     await writeOfficialBranding('integrity-migration', Date.now());
     console.log(`[Branding] Documento heredado respaldado en system_config/${backupId}; logotipo oficial restaurado.`);
   } catch (err: any) {
-    if (err?.code === 7 || err?.message?.includes('PERMISSION_DENIED') || err?.message?.includes('insufficient permissions')) {
+    const errMsg = String(err?.message || err || '');
+    if (
+      err?.code === 7 ||
+      String(err?.code) === '7' ||
+      errMsg.includes('PERMISSION_DENIED') ||
+      errMsg.includes('insufficient permissions') ||
+      errMsg.includes('Missing or insufficient permissions')
+    ) {
       return;
     }
-    console.warn('[Branding] Aviso en verificación de integridad de marca:', err);
+    console.warn('[Branding] Aviso en verificación de integridad de marca:', errMsg);
   }
 }
 

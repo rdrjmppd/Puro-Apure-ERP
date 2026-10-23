@@ -181,6 +181,17 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     };
   }, [activeLineId]);
 
+  // Sincronización proactiva de la cola offline del puente Baileys (cero pérdida de mensajes y OCR)
+  useEffect(() => {
+    WhatsAppCloneService.syncOfflineQueue(activeLineId).catch(() => {});
+
+    const syncInterval = setInterval(() => {
+      WhatsAppCloneService.syncOfflineQueue(activeLineId).catch(() => {});
+    }, 10000);
+
+    return () => clearInterval(syncInterval);
+  }, [activeLineId]);
+
   // Línea actualmente activa
   const activeLine = useMemo(() => {
     return lines.find((l) => l.id === activeLineId) || lines[0] || null;
@@ -1782,3 +1793,5 @@ export const WhatsAppWebCloneView: React.FC<WhatsAppWebCloneViewProps> = ({
     </div>
   );
 };
+
+export default WhatsAppWebCloneView;

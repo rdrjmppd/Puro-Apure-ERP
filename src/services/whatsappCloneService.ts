@@ -849,4 +849,84 @@ export class WhatsAppCloneService {
   static generateDirectWhatsAppUrl(phone: string, messageText?: string): string {
     return this.generateWaMeLink(phone, messageText);
   }
+
+  /**
+   * Sincroniza la cola fuera de línea (mensajes e imágenes OCR) del puente local hacia Firestore
+   * Garantiza tolerancia absoluta ante permisos de Firebase Admin o micro-cortes
+   */
+  static async syncOfflineQueue(lineaId?: string): Promise<{ syncedMessages: number; syncedOcr: number }> {
+    if (typeof window === 'undefined') return { syncedMessages: 0, syncedOcr: 0 };
+    try {
+      const url = lineaId ? `/api/whatsapp/offline-queue?lineaId=${encodeURIComponent(lineaId)}` : '/api/whatsapp/offline-queue';
+      const res = await fetch(url);
+      if (!res.ok) return { syncedMessages: 0, syncedOcr: 0 };
+      const data = await res.json();
+      if (!data.success) return { syncedMessages: 0, syncedOcr: 0 };
+
+      const pendingMessages = Array.isArray(data.pendingMessages) ? data.pendingMessages : [];
+      const pendingOcr = Array.isArray(data.pendingOcr) ? data.pendingOcr : [];
+
+      if (pendingMessages.length === 0 && pendingOcr.length === 0) {
+        return { syncedMessages: 0, syncedOcr: 0 };
+      }
+
+      const syncedMsgIds: string[] = [];
+      const syncedOcrIds: string[] = [];
+
+      // Sincronizar mensajes en Firestore
+      for (const msg of pendingMessages) {
+        try {
+          const docRef = doc(db, MESSAGES_COLLECTION, msg.id);
+          const payload = sanitizeFirestorePayload({
+            ...msg,
+            whatsappMessageId: msg.whatsappMessageId || msg.id,
+            ocrStatus: msg.hasComprobantePago ? 'PENDIENTE' : 'NO_ANALIZADO',
+          });
+          await setDoc(docRef, payload, { merge: true });
+          syncedMsgIds.push(msg.id);
+        } catch (e) {
+          console.debug('[WhatsAppCloneService] Reintentando mensaje en siguiente ciclo:', msg.id, e);
+        }
+      }
+
+      // Sincronizar comprobantes OCR en Firestore
+      for (const ocr of pendingOcr) {
+        try {
+          const docRef = doc(db, 'pagos_reportados_ocr', ocr.id);
+          const payload = sanitizeFirestorePayload({
+            ...ocr,
+            fechaReporte: ocr.fechaReporte || Date.now(),
+            estadoConciliacion: ocr.estadoConciliacion || 'pendiente_revision',
+            origen: ocr.origen || 'WHATSAPP_WEB_REAL',
+            ocrVerdict: ocr.ocrVerdict || 'PENDIENTE_DISPARO_MANUAL',
+          });
+          await setDoc(docRef, payload, { merge: true });
+          syncedOcrIds.push(ocr.id);
+        } catch (e) {
+          console.debug('[WhatsAppCloneService] Reintentando OCR en siguiente ciclo:', ocr.id, e);
+        }
+      }
+
+      // Confirmar al puente backend para liberar memoria y disco
+      if (syncedMsgIds.length > 0 || syncedOcrIds.length > 0) {
+        await fetch('/api/whatsapp/offline-queue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            messageIds: syncedMsgIds,
+            ocrIds: syncedOcrIds,
+          }),
+        });
+      }
+
+      return {
+        syncedMessages: syncedMsgIds.length,
+        syncedOcr: syncedOcrIds.length,
+      };
+    } catch (err) {
+      console.debug('[WhatsAppCloneService] Error en sincronización de cola offline:', err);
+      return { syncedMessages: 0, syncedOcr: 0 };
+    }
+  }
 }
+

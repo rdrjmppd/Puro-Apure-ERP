@@ -797,3 +797,5 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
     </div>
   );
 };
+
+export default LectorComprobanteOCRModal;
