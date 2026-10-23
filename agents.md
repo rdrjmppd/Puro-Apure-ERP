@@ -35,3 +35,14 @@
 4. **Prohibición de `<iframe>` de WhatsApp Web y Diálogos Bloqueables:** Todos los componentes y modales son React nativos sin `window.confirm`, `window.alert` ni `window.prompt`.
 5. **Cero Mock Data:** Indicadores en `0.00` y listas vacías descriptivas cuando no hay registros reales en la base de datos.
 6. **Protección de Secretos:** `.whatsapp_sessions/` y archivos `.env*` quedan excluidos de cualquier seguimiento Git.
+
+---
+
+## 4. Doctrinas Especializadas de @OCR y Matriz Forense de Veracidad
+1. **Doble Motor de Alta Disponibilidad:** Gemini Vision API (Capa 1) con fallback inmediato y sin errores a Tesseract OCR sobre píxeles reales (Capa 2).
+2. **Filtrado de Íconos de Copiado (`❐`):** Eliminación de pictogramas de portapapeles que añaden un 13° dígito espurio en referencias bancarias SUDEBAN (normalización canónica a 12 dígitos en Bancamiga, BDV y Banesco).
+3. **Extracción Multilínea Pura:** Rechazo estricto de fragmentos de etiquetas textuales (`"erencia"` en Mercantil o `"Exitosa"` en Banesco) mediante inspección en ventana multilínea de secuencias numéricas `\b\d{6,16}\b`.
+4. **Huellas Dactilares de Plantilla (Template Fingerprinting):** Separación determinista entre Banco Emisor y Banco Receptor. El Banco Receptor jamás sobrescribe al Banco Emisor.
+5. **Modo Oscuro y Tolerancia Tipográfica:** Reconocimiento de montos con sufijo monetario (`13.201,00 Bs`, `14.082,00 Bs`) y tolerancia a confusiones ópticas (`8s` por `Bs`).
+6. **Compensación Multi-Orientación (0°/90°/180°/270°):** Lectura nativa con Gemini Vision y rotación por Canvas 2D en fallback cliente.
+7. **Calibración de Matriz Forense (Base 100 Puntos):** Todo comprobante bancario legítimo con banco, referencia y monto válidos recibe calificación >= 90% (`AUTENTICO_ALTA_CONFIANZA`), erradicando falsos estados sospechosos (60% u 80%).

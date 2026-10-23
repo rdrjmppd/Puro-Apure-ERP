@@ -26,7 +26,7 @@ import zlib from 'zlib';
 import { GoogleGenAI } from '@google/genai';
 import { adminApp, adminAuth, adminDb, FieldValue, hasAdminCredentials } from './firebaseAdmin';
 import { sanitizeFirestorePayload } from '../src/utils/sanitizeFirestorePayload';
-import { parseBankReceiptText, parseVenezuelanOrInternationalAmount, formatCaracasDate, getCaracasToday } from '../src/utils/bankReceiptParser';
+import { parseBankReceiptText, parseVenezuelanOrInternationalAmount, formatCaracasDate, getCaracasToday, normalizeBankReference } from '../src/utils/bankReceiptParser';
 
 export interface WhatsAppQrBridgeStatus {
   lineaId: string;
@@ -1477,10 +1477,10 @@ Analiza con rigor óptico absoluto la imagen adjunta y extrae en formato estrict
 {
   "esComprobanteValido": true,
   "modalidad": "Pago Móvil" | "Transferencia" | "Zelle" | "Criptoactivos" | "Retención fiscal" | "Efectivo",
-  "bancoEmisor": "Nombre del banco emisor (ej. Mercantil Banco Universal, Bancamiga, Banesco, Banco de Venezuela, Provincial, BNC, etc.)",
+  "bancoEmisor": "Nombre del banco emisor (ej. Mercantil Banco Universal, Bancamiga, Banesco, Banco de Venezuela, BBVA Provincial, BNC, etc.)",
   "bancoReceptor": "Nombre del banco receptor o destino si aplica",
   "codigoBancoDestino": "Código de 4 dígitos SUDEBAN si aplica (ej. 0172, 0102, 0134, etc.)",
-  "numeroReferencia": "Solo dígitos o alfanumérico exacto impreso en el comprobante (ej. 47362693, 112338509503)",
+  "numeroReferencia": "Solo dígitos o alfanumérico exacto impreso en el comprobante (ej. 47362693, 114020953304, 062896473548)",
   "monedaOriginal": "VES" | "USD",
   "montoOriginal": 0.00,
   "fechaComprobante": "DD/MM/YYYY o YYYY-MM-DD",
@@ -1492,8 +1492,11 @@ Analiza con rigor óptico absoluto la imagen adjunta y extrae en formato estrict
   "indicadoresManipulacionVisual": []
 }
 REGLAS OBLIGATORIAS:
-1. Convierte montos venezolanos (ej. Bs. 44.238,00 o 8.833,96) a número decimal puro (44238.00 o 8833.96).
-2. Si un dato no está impreso en la imagen, déjalo como cadena vacía "". PROHIBIDO inventar datos o usar valores por defecto.`;
+1. Orientación y Modo de Color: Lee el comprobante con total exactitud independientemente de su orientación (0°, 90°, 180° o 270°) y su modo de color (claro u oscuro / dark mode). En comprobantes en modo oscuro (como BDV), lee con precisión montos con notación 'Bs' o '8s' al final (ej. '13.201,00 Bs' o '14.082,00 Bs').
+2. Número de Referencia Limpio: Si al lado del número de referencia hay un ícono de copiado (❐ o rectángulos superpuestos), NO agregues dígitos espurios al final; extrae la referencia canónica exacta (12 dígitos para pago móvil o los dígitos impresos). En Banesco, NO confundas '¡Operación Exitosa!' con el número de referencia; la referencia está identificada por 'NÚMERO DE REFERENCIA'. En Mercantil, extrae los dígitos numéricos debajo de 'Nro. de referencia:' (ej. 47362693) y NUNCA devuelvas la palabra 'erencia'.
+3. Banco Emisor vs Banco Receptor: Si el recibo dice 'BANCO EMISOR BANESCO' y 'BANCO RECEPTOR BANCO DE VENEZUELA', el emisor es Banesco y el receptor es Banco de Venezuela. NUNCA intercambies o sobrescribas el banco emisor con el receptor.
+4. Convierte montos venezolanos (ej. Bs. 44.238,00 o 13.201,00 Bs o 8.833,96) a número decimal puro (44238.00 o 13201.00 o 8833.96).
+5. Si un dato no está impreso en la imagen, déjalo como cadena vacía "". PROHIBIDO inventar datos o usar valores por defecto.`;
 
     for (const model of candidateModels) {
       try {
@@ -1552,7 +1555,7 @@ REGLAS OBLIGATORIAS:
             fechaComprobante: fechaNorm,
             horaComprobante: horaStr,
             fechaHoraDisplay: displayDateTime,
-            numeroReferencia: String(parsed.numeroReferencia || '').replace(/[^0-9A-Za-z]/g, ''),
+            numeroReferencia: normalizeBankReference(String(parsed.numeroReferencia || '')),
             monedaOriginal: parsed.monedaOriginal === 'USD' ? 'USD' : 'VES',
             montoOriginal: montoExacto,
             rifCedula: parsed.rifCedulaBeneficiario || parsed.rifCedula || '',

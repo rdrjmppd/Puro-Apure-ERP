@@ -406,6 +406,56 @@ export function evaluateVeracityScore(params: VeracityEvaluationParams): {
   };
 }
 
+
+/**
+ * Preprocesa una imagen en navegador aplicando rotación (90°, 180°, 270°)
+ * o inversión cromática negativa para comprobantes bancarios en modo oscuro.
+ */
+export async function preprocessOrRotateImage(
+  dataUri: string,
+  rotationDeg: 0 | 90 | 180 | 270 = 0,
+  invertColors: boolean = false
+): Promise<string> {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return dataUri;
+  }
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        const isSideways = rotationDeg === 90 || rotationDeg === 270;
+        canvas.width = isSideways ? img.height : img.width;
+        canvas.height = isSideways ? img.width : img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return resolve(dataUri);
+
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate((rotationDeg * Math.PI) / 180);
+        ctx.drawImage(img, -img.width / 2, -img.height / 2);
+
+        if (invertColors) {
+          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const d = imgData.data;
+          for (let i = 0; i < d.length; i += 4) {
+            d[i] = 255 - d[i];
+            d[i + 1] = 255 - d[i + 1];
+            d[i + 2] = 255 - d[i + 2];
+          }
+          ctx.putImageData(imgData, 0, 0);
+        }
+
+        resolve(canvas.toDataURL('image/jpeg', 0.92));
+      } catch {
+        resolve(dataUri);
+      }
+    };
+    img.onerror = () => resolve(dataUri);
+    img.src = dataUri;
+  });
+}
+
 export class OcrForensicService {
   /**
    * Ejecuta el análisis completo del comprobante bajo demanda respetando los 4 Candados de Veracidad
@@ -652,41 +702,74 @@ export class OcrForensicService {
     }
 
     // 2. Capa Secundaria: Reconocimiento Óptico Real sobre Píxeles en Cliente (Tesseract.js)
+    let worker: any = null;
     try {
       const { createWorker } = await import('tesseract.js');
-      const worker = await createWorker('spa+eng');
-      const imagePayload = base64Clean.startsWith('data:') ? base64Clean : `data:${mimeType || 'image/jpeg'};base64,${base64Clean}`;
-      const ret = await worker.recognize(imagePayload);
-      await worker.terminate();
+      worker = await createWorker('spa+eng');
+      const basePayload = base64Clean.startsWith('data:')
+        ? base64Clean
+        : `data:${mimeType || 'image/jpeg'};base64,${base64Clean}`;
 
-      const ocrRawText = ret?.data?.text || '';
-      if (ocrRawText.trim().length > 10) {
-        const parsed = parseBankReceiptText(ocrRawText);
-        if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
-          return {
-            tipoComprobante: parsed.tipoComprobante,
-            bancoEmisor: parsed.bancoEmisor,
-            bancoReceptor: parsed.bancoReceptor,
-            codigoBancoDestino: parsed.codigoBancoDestino,
-            fechaComprobante: parsed.fechaComprobante,
-            horaComprobante: parsed.horaComprobante,
-            fechaHoraDisplay: parsed.fechaHoraDisplay,
-            numeroReferencia: parsed.numeroReferencia,
-            monedaOriginal: parsed.monedaOriginal,
-            montoOriginal: parsed.montoOriginal,
-            rifCedula: parsed.rifCedula,
-            telefonoNombreEmisor: parsed.telefonoNombreEmisor,
-            cuentaOrigen: parsed.cuentaOrigen,
-            concepto: parsed.concepto,
-            consistenciaTipografica: true,
-            halosDeColor: false,
-            patronBancarioValido: true,
-            analisisVisualDetalle: 'Extracción óptica de píxeles mediante Tesseract OCR local en cliente.',
-          };
+      // Intentar primero a 0° orientación estándar
+      let ret = await worker.recognize(basePayload);
+      let ocrRawText = ret?.data?.text || '';
+      let parsed = parseBankReceiptText(ocrRawText);
+
+      // Si el texto es insuficiente o no es válido, probar con inversiones y rotaciones (90°, 180°, 270°)
+      if (!parsed.esComprobanteValido || parsed.montoOriginal <= 0 || !parsed.numeroReferencia) {
+        const transformations: { angle: 0 | 90 | 180 | 270; invert: boolean }[] = [
+          { angle: 0, invert: true },
+          { angle: 90, invert: false },
+          { angle: 180, invert: false },
+          { angle: 270, invert: false },
+        ];
+
+        for (const t of transformations) {
+          try {
+            const transformedPayload = await preprocessOrRotateImage(basePayload, t.angle, t.invert);
+            const tRet = await worker.recognize(transformedPayload);
+            const tText = tRet?.data?.text || '';
+            if (tText.trim().length > 10) {
+              const tParsed = parseBankReceiptText(tText);
+              if (tParsed.esComprobanteValido || (tParsed.montoOriginal > 0 && tParsed.numeroReferencia)) {
+                parsed = tParsed;
+                break;
+              }
+            }
+          } catch (_) {}
         }
+      }
+
+      if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
+        return {
+          tipoComprobante: parsed.tipoComprobante,
+          bancoEmisor: parsed.bancoEmisor,
+          bancoReceptor: parsed.bancoReceptor,
+          codigoBancoDestino: parsed.codigoBancoDestino,
+          fechaComprobante: parsed.fechaComprobante,
+          horaComprobante: parsed.horaComprobante,
+          fechaHoraDisplay: parsed.fechaHoraDisplay,
+          numeroReferencia: parsed.numeroReferencia,
+          monedaOriginal: parsed.monedaOriginal,
+          montoOriginal: parsed.montoOriginal,
+          rifCedula: parsed.rifCedula,
+          telefonoNombreEmisor: parsed.telefonoNombreEmisor,
+          cuentaOrigen: parsed.cuentaOrigen,
+          concepto: parsed.concepto,
+          consistenciaTipografica: true,
+          halosDeColor: false,
+          patronBancarioValido: true,
+          analisisVisualDetalle: 'Extracción óptica de píxeles mediante Tesseract OCR local con compensación multi-orientación y contraste.',
+        };
       }
     } catch (clientTessErr) {
       console.debug('[OcrForensicService] Tesseract cliente no pudo procesar imagen:', clientTessErr);
+    } finally {
+      if (worker) {
+        try {
+          await worker.terminate();
+        } catch (_) {}
+      }
     }
 
     // Fallback defensivo Cero Mock Data: Nunca inventar cifras ni bancos ficticios

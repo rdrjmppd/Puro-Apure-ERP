@@ -133,10 +133,16 @@ export function parseVenezuelanOrInternationalAmount(raw: string): number {
 
 /**
  * Normaliza cualquier número de referencia bancaria a formato alfanumérico en mayúsculas sin espacios
+ * Filtra artefactos comunes de íconos de copiado (❐) que agregan un 13° dígito espurio o corchetes.
  */
 export function normalizeBankReference(ref: string): string {
   if (!ref) return '';
-  return ref.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  let clean = ref.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  // Si tiene 13 dígitos numéricos en pagos móviles venezolanos estándar (12 dígitos canónicos)
+  if (/^\d{13}$/.test(clean)) {
+    clean = clean.slice(0, 12);
+  }
+  return clean;
 }
 
 /**
@@ -170,6 +176,8 @@ const BANCOS_SUDEBAN = [
 /**
  * Parser de Texto Real extraído de la imagen (OCR)
  * Procesa el texto plano impreso sin contaminarse de cadenas Base64.
+ * Incluye soporte multilínea, huellas dactilares de plantilla bancaria,
+ * filtrado de íconos de copiado (❐) y reconocimiento de montos en modo oscuro / claro.
  */
 export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
   const anomalies: string[] = [];
@@ -195,6 +203,11 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
     };
   }
 
+  const lines = text
+    .split(/[\r\n]+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
   const lower = text.toLowerCase();
 
   // 1. MODALIDAD / TIPO DE COMPROBANTE
@@ -215,132 +228,314 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
     tipoComprobante = 'PAGO_MOVIL';
   }
 
-  // 2. DETECCIÓN DE BANCOS
+  // 2. DETECCIÓN DE BANCOS Y HUELLAS DACTILARES DE PLANTILLA
   let bancoEmisor = '';
   let bancoReceptor = '';
   let codigoBancoDestino = '';
 
-  // Detección directa por etiquetas bancarias específicas
-  // Caso Mercantil Tpago:
-  const isMercantil = /mercantil|tpago/i.test(text);
-  if (isMercantil) {
-    bancoEmisor = 'Mercantil Banco Universal';
+  // Huella Banesco: "¡Operación Exitosa!", "En breve le llegará un SMS", mención de Banesco o "BANCO EMISOR BANESCO"
+  const isBanescoFingerprint =
+    /banesco/i.test(text) ||
+    /operaci[oó]n exitosa/i.test(text) ||
+    /en breve le llegar[aá] un sms/i.test(text) ||
+    /n[uú]mero celular de origen/i.test(text);
+
+  if (isBanescoFingerprint) {
+    bancoEmisor = 'Banesco Banco Universal';
   }
 
-  // Caso Bancamiga:
-  const isBancamiga = /bancamiga/i.test(text);
-  if (isBancamiga && !bancoEmisor) {
+  // Huella Bancamiga: mención explícita o secuencia canónica de campos
+  const isBancamigaFingerprint =
+    /bancamiga/i.test(text) ||
+    (/numero\s*de\s*referencia/i.test(text) &&
+      (/monto\s*de\s*la\s*operaci[oó]n/i.test(text) ||
+        /ci\s*\/?\s*rif\s*beneficiario/i.test(text) ||
+        /telf\s*beneficiario/i.test(text)));
+
+  if (isBancamigaFingerprint && !bancoEmisor) {
     bancoEmisor = 'Bancamiga Banco Universal';
   }
 
-  // Buscar Banco Destino explícito (ej. "Banco destino: 0172 - Bancamiga", "BANCO: BANCO DE VENEZUELA")
-  const bancoDestinoMatch =
-    text.match(/(?:banco\s*destino|banco\s*receptor|banco\s*beneficiario)\s*[:\s]\s*([^\n\r,]+)/i) ||
-    text.match(/\b(?:banco)\s*:\s*([^\n\r,]+)/i);
+  // Huella Mercantil: "Tpago", "Tu Tpago fue exitoso", "Cuenta origen"
+  const isMercantilFingerprint =
+    /mercantil/i.test(text) ||
+    /tpago|t-pago/i.test(text) ||
+    /tu tpago fue exitoso/i.test(text);
 
-  if (bancoDestinoMatch) {
-    const rawDest = bancoDestinoMatch[1].trim();
-    // Extraer código si viene ej. 0172
-    const codeMatch = rawDest.match(/\b(01\d{2})\b/);
-    if (codeMatch) {
-      codigoBancoDestino = codeMatch[1];
-      const foundBank = BANCOS_SUDEBAN.find((b) => b.code === codigoBancoDestino);
-      if (foundBank) {
-        bancoReceptor = `${foundBank.code} - ${foundBank.nombre}`;
-      } else {
-        bancoReceptor = rawDest;
-      }
-    } else {
-      // Buscar por nombre
+  if (isMercantilFingerprint) {
+    bancoEmisor = 'Mercantil Banco Universal';
+  }
+
+  // Huella Banco de Venezuela (BDV): "PagomóvilBDV", "Pago Clave", "Origen: 0102"
+  const isBdvFingerprint =
+    /pagom[oó]vilbdv/i.test(text) ||
+    /pago clave/i.test(text) ||
+    /origen:\s*(?:\*\*\*\*)*0102/i.test(text) ||
+    /\b0102\*{4,}/i.test(text);
+
+  if (isBdvFingerprint && !bancoEmisor) {
+    bancoEmisor = 'Banco de Venezuela';
+  }
+
+  // Huella BBVA Provincial
+  const isProvincialFingerprint = /provincial|bbva|dinero r[aá]pido/i.test(text);
+  if (isProvincialFingerprint && !bancoEmisor) {
+    bancoEmisor = 'BBVA Provincial';
+  }
+
+  // Huella BNC
+  const isBncFingerprint = /banco nacional de cr[eé]dito|pos bnc|\bbnc\b/i.test(text);
+  if (isBncFingerprint && !bancoEmisor) {
+    bancoEmisor = 'Banco Nacional de Crédito (BNC)';
+  }
+
+  // Parseo línea a línea de BANCO EMISOR y BANCO RECEPTOR / DESTINO
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Reconocimiento de BANCO EMISOR
+    if (/^(?:banco\s*emisor|cuenta\s*origen|banco\s*origen)\b/i.test(line)) {
+      const restOfLine = line.replace(/^(?:banco\s*emisor|cuenta\s*origen|banco\s*origen)[:\s]*/i, '').trim();
+      const candidateText = restOfLine || (lines[i + 1] ? lines[i + 1].trim() : '');
       for (const b of BANCOS_SUDEBAN) {
-        if (b.aliases.some((alias) => rawDest.toLowerCase().includes(alias))) {
-          bancoReceptor = b.nombre;
-          codigoBancoDestino = b.code;
+        if (b.aliases.some((alias) => candidateText.toLowerCase().includes(alias))) {
+          bancoEmisor = b.nombre;
           break;
         }
       }
-      if (!bancoReceptor) {
-        bancoReceptor = rawDest;
+    }
+
+    // Reconocimiento de BANCO RECEPTOR / BANCO DESTINO / BANCO BENEFICIARIO
+    if (/^(?:banco\s*receptor|banco\s*destino|banco\s*beneficiario|banco)\b/i.test(line)) {
+      if (/banco\s*emisor/i.test(line)) continue;
+      const restOfLine = line.replace(/^(?:banco\s*receptor|banco\s*destino|banco\s*beneficiario|banco)[:\s]*/i, '').trim();
+      const candidateText = restOfLine || (lines[i + 1] ? lines[i + 1].trim() : '');
+      if (candidateText) {
+        const codeMatch = candidateText.match(/\b(01\d{2})\b/);
+        if (codeMatch) {
+          codigoBancoDestino = codeMatch[1];
+          const found = BANCOS_SUDEBAN.find((b) => b.code === codigoBancoDestino);
+          if (found) {
+            bancoReceptor = `${found.code} - ${found.nombre}`;
+          } else {
+            bancoReceptor = candidateText;
+          }
+        } else {
+          for (const b of BANCOS_SUDEBAN) {
+            if (b.aliases.some((alias) => candidateText.toLowerCase().includes(alias))) {
+              bancoReceptor = b.nombre;
+              codigoBancoDestino = b.code;
+              break;
+            }
+          }
+          if (!bancoReceptor && candidateText.length > 2 && !/^\d+$/.test(candidateText)) {
+            bancoReceptor = candidateText;
+          }
+        }
       }
     }
   }
 
-  // Si no se ha detectado emisor, escanear el texto por menciones bancarias
+  // Fallback si aún no se detectó emisor: buscar por menciones bancarias generales
   if (!bancoEmisor) {
     for (const b of BANCOS_SUDEBAN) {
       if (b.aliases.some((alias) => lower.includes(alias))) {
-        bancoEmisor = b.nombre;
-        break;
+        if (!bancoReceptor || !bancoReceptor.toLowerCase().includes(b.nombre.toLowerCase())) {
+          bancoEmisor = b.nombre;
+          break;
+        }
       }
     }
   }
 
-  // Si el emisor y el receptor son el mismo y hay mención de otro banco
+  // Si bancoEmisor y bancoReceptor son idénticos
   if (bancoEmisor && bancoReceptor && bancoEmisor.toLowerCase() === bancoReceptor.toLowerCase()) {
     bancoReceptor = '';
   }
 
-  // 3. NÚMERO DE REFERENCIA
+  // 3. NÚMERO DE REFERENCIA (Con soporte multilínea, descarte de etiquetas y filtrado de íconos de copia)
   let numeroReferencia = '';
-  // Etiquetas prioritarias
-  const refPatterns = [
-    /(?:nro\.?\s*de\s*referencia|numero\s*de\s*referencia|n[uú]mero\s*de\s*referencia)[:\s#.]*([0-9A-Za-z]{6,16})/i,
-    /(?:referencia|ref\.?|operaci[oó]n|transacci[oó]n|comprobante)[:\s#.]*([0-9A-Za-z]{6,16})/i,
-    /(?:nro\.?|num\.?)[:\s#.]*([0-9]{8,14})/i,
-  ];
 
-  for (const pat of refPatterns) {
-    const m = text.match(pat);
-    if (m && m[1]) {
-      numeroReferencia = m[1].trim().replace(/[^0-9A-Za-z]/g, '');
-      break;
+  const cleanReferenceCandidate = (raw: string): string => {
+    if (!raw) return '';
+    // Eliminar pictogramas de copiado (como ❐, □, [], pipes) y signos no alfanuméricos
+    let clean = raw.replace(/[\[\]|\u25A1\u29C9\u274F\u25FB\u25FC\u2398\u2B1A]/g, '').trim();
+    // Extraer secuencia alfanumérica
+    const match = clean.match(/[0-9A-Za-z]{6,16}/);
+    if (!match) return '';
+    let val = match[0];
+    // Descartar si es una palabra de diccionario / etiqueta
+    const wordBlacklist = [
+      'exitosa', 'operacion', 'operación', 'erencia', 'referencia', 'comprobante',
+      'bancamiga', 'banesco', 'mercantil', 'venezuela', 'provincial', 'aprobada',
+      'aprobado', 'exitoso', 'transferencia', 'transaccion', 'transacción', 'enlinea',
+    ];
+    if (wordBlacklist.includes(val.toLowerCase()) || /^[A-Za-z]+$/.test(val)) {
+      return '';
     }
-  }
-
-  // Fallback si no tiene etiqueta: secuencia de 8 a 14 dígitos aislada
-  if (!numeroReferencia) {
-    const rawDigits = text.match(/\b([0-9]{8,14})\b/);
-    if (rawDigits) {
-      numeroReferencia = rawDigits[1];
+    // Descartar si parece fecha DDMMYYYY o YYYYMMDD
+    if (/^(?:19|20)\d{6}$/.test(val) || /^\d{2}(?:0[1-9]|1[0-2])(?:19|20)\d{2}$/.test(val)) {
+      return '';
     }
-  }
+    // Si tiene 13 dígitos numéricos (ícono ❐ leído como 0, 8, 9 en referencias canónicas de 12 dígitos)
+    if (/^\d{13}$/.test(val)) {
+      val = val.slice(0, 12);
+    }
+    return val;
+  };
 
-  // 4. MONTO ORIGINAL Y MONEDA
-  let montoOriginal = 0;
-  // Búsqueda específica de etiquetas de monto
-  const montoPatterns = [
-    // Mercantil: "Monto (Bs.): 44.238,00"
-    /monto\s*\((?:bs\.?|ves)\)[:\s]*([0-9.,]+)/i,
-    // Bancamiga: "MONTO DE LA OPERACION: Bs. 8.833,96"
-    /monto\s*de\s*la\s*operaci[oó]n[:\s]*(?:bs\.?)?\s*([0-9.,]+)/i,
-    // Genérico con prefijo de moneda
-    /(?:bs\.?|ves|bol[ií]vares)[:\s]*([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})/i,
-    /([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})\s*(?:bs\.?|ves)/i,
-    /(?:\$|usd)[:\s]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})/i,
-    /([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})\s*(?:usd|\$)/i,
-    // Etiqueta Monto o Total
-    /(?:monto|total|pagado|importe)[:\s]*([0-9.,]+)/i,
-  ];
+  // Buscar en líneas con etiquetas de referencia (multilínea tolerante)
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
 
-  for (const pat of montoPatterns) {
-    const m = text.match(pat);
-    if (m && m[1]) {
-      const parsed = parseVenezuelanOrInternationalAmount(m[1]);
-      if (parsed > 0) {
-        montoOriginal = parsed;
-        if (/usd|\$/i.test(m[0])) {
-          monedaOriginal = 'USD';
-        }
+    // Ignorar encabezados como "¡Operación Exitosa!"
+    if (/operaci[oó]n exitosa/i.test(line)) {
+      continue;
+    }
+
+    if (
+      /(?:nro\.?\s*(?:de\s*)?referencia|n[uú]mero\s*(?:de\s*)?referencia|referencia\b|ref\b|nro\b|secuencia\b|n[uú]mero\s*(?:de\s*)?operaci[oó]n)/i.test(
+        line
+      )
+    ) {
+      // 1. Intentar en la misma línea después de la etiqueta
+      const afterLabel = line
+        .replace(
+          /^.*?(?:nro\.?\s*(?:de\s*)?referencia|n[uú]mero\s*(?:de\s*)?referencia|referencia|ref|nro|secuencia|n[uú]mero\s*(?:de\s*)?operaci[oó]n)[:\s#.]*/i,
+          ''
+        )
+        .trim();
+      const candSameLine = cleanReferenceCandidate(afterLabel);
+      if (candSameLine) {
+        numeroReferencia = candSameLine;
         break;
+      }
+
+      // 2. Multilínea: Buscar en la línea siguiente (o subsiguiente)
+      if (lines[i + 1]) {
+        const candNext = cleanReferenceCandidate(lines[i + 1]);
+        if (candNext) {
+          numeroReferencia = candNext;
+          break;
+        }
+      }
+      if (lines[i + 2]) {
+        const candNext2 = cleanReferenceCandidate(lines[i + 2]);
+        if (candNext2) {
+          numeroReferencia = candNext2;
+          break;
+        }
       }
     }
   }
 
-  // Fallback para monto: cualquier patrón decimal tipo venezolano (ej. 44.238,00)
+  // Fallback si no se encontró con etiqueta: buscar secuencia de 8 a 14 dígitos aislada
+  if (!numeroReferencia) {
+    const digitMatches = text.match(/\b([0-9]{8,14})\b/g);
+    if (digitMatches) {
+      for (const dm of digitMatches) {
+        // Filtrar números de cuenta, teléfonos o fechas
+        if (
+          dm.startsWith('0414') ||
+          dm.startsWith('0424') ||
+          dm.startsWith('0412') ||
+          dm.startsWith('0416') ||
+          dm.startsWith('0426')
+        ) {
+          continue;
+        }
+        const cleaned = cleanReferenceCandidate(dm);
+        if (cleaned) {
+          numeroReferencia = cleaned;
+          break;
+        }
+      }
+    }
+  }
+
+  // 4. MONTO ORIGINAL Y MONEDA (Multilínea tolerante, sufijos "Bs", "8s" y modo oscuro)
+  let montoOriginal = 0;
+
+  const cleanAmountCandidate = (raw: string): number => {
+    if (!raw) return 0;
+    // Normalizar lecturas de Tesseract en modo oscuro donde "Bs" se confunde con "8s" o "$s"
+    const sanitized = raw.replace(/\b8s\b/gi, 'Bs').replace(/\$s\b/gi, 'Bs');
+    return parseVenezuelanOrInternationalAmount(sanitized);
+  };
+
+  // 1. Multilínea tolerante para etiquetas de monto (ej. "Monto (Bs.):\n44.238,00" o "MONTO DE LA OPERACIÓN:\nBs. 8.833,96")
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (
+      /(?:monto\s*\((?:bs\.?|ves)\)|monto\s*de\s*la\s*operaci[oó]n|monto\s*total|importe|total|pagado|monto\b)/i.test(
+        line
+      )
+    ) {
+      // Misma línea
+      const afterMonto = line
+        .replace(
+          /^.*?(?:monto\s*\((?:bs\.?|ves)\)|monto\s*de\s*la\s*operaci[oó]n|monto\s*total|importe|total|pagado|monto)[:\s]*/i,
+          ''
+        )
+        .trim();
+      const parsedSame = cleanAmountCandidate(afterMonto);
+      if (parsedSame > 0) {
+        montoOriginal = parsedSame;
+        if (/usd|\$/i.test(line)) monedaOriginal = 'USD';
+        break;
+      }
+      // Línea siguiente
+      if (lines[i + 1]) {
+        const nextLine = lines[i + 1].trim();
+        const parsedNext = cleanAmountCandidate(nextLine);
+        if (parsedNext > 0) {
+          montoOriginal = parsedNext;
+          if (/usd|\$/i.test(line) || /usd|\$/i.test(nextLine)) monedaOriginal = 'USD';
+          break;
+        }
+      }
+    }
+  }
+
+  // 2. Patrones directos con prefijo o sufijo de moneda (incluyendo Tesseract "8s" por "Bs")
   if (montoOriginal === 0) {
-    const genericVes = text.match(/\b([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})\b/);
-    if (genericVes) {
-      montoOriginal = parseVenezuelanOrInternationalAmount(genericVes[1]);
+    const directPatterns = [
+      // Sufijo venezolano: "13.201,00 Bs", "14.082,00 Bs", "13.201,00 8s", "44.238,00 VES"
+      /([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})\s*(?:bs\.?|ves|8s|bol[ií]vares)\b/i,
+      // Prefijo venezolano: "Bs. 44.238,00", "Bs 13.201,00", "8s. 14.082,00"
+      /(?:bs\.?|ves|8s|bol[ií]vares)[:\s]*([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})/i,
+      // Sufijo USD: "50.00 USD", "49.92 $"
+      /([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})\s*(?:usd|\$)/i,
+      // Prefijo USD: "$ 50.00", "USD 49.92"
+      /(?:\$|usd)[:\s]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})/i,
+    ];
+
+    for (const pat of directPatterns) {
+      const m = text.match(pat);
+      if (m && m[1]) {
+        const val = cleanAmountCandidate(m[1]);
+        if (val > 0) {
+          montoOriginal = val;
+          if (/usd|\$/i.test(m[0])) {
+            monedaOriginal = 'USD';
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  // 3. Fallback genérico para cualquier decimal con formato venezolano
+  if (montoOriginal === 0) {
+    const genericVesMatches = text.match(/\b([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})\b/g);
+    if (genericVesMatches) {
+      for (const gm of genericVesMatches) {
+        const val = cleanAmountCandidate(gm);
+        if (val > 0) {
+          montoOriginal = val;
+          break;
+        }
+      }
     }
   }
 
@@ -349,34 +544,31 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
   let horaComprobante = '';
   let fechaHoraDisplay = '';
 
-  // Caso Mercantil: "Fecha y hora del envío: 22/10/2026 a las 11:04:42 AM"
-  const mercantilFechaHora = text.match(
-    /fecha\s*y\s*hora(?:\s*del\s*env[ií]o)?[:\s]*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})(?:\s*(?:a\s*las\s*)?([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?(?:\s*[AaPp][Mm])?))?/i
+  const fechaPattern = text.match(
+    /(?:fecha\s*y\s*hora(?:\s*del\s*env[ií]o)?|fecha|date)[:\s]*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})(?:\s*(?:a\s*las\s*)?([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?(?:\s*[AaPp][Mm])?))?/i
   );
 
-  if (mercantilFechaHora) {
-    fechaComprobante = formatCaracasDate(mercantilFechaHora[1]);
-    if (mercantilFechaHora[2]) {
-      horaComprobante = mercantilFechaHora[2].trim();
-      fechaHoraDisplay = `${mercantilFechaHora[1]} ${horaComprobante}`;
+  if (fechaPattern) {
+    fechaComprobante = formatCaracasDate(fechaPattern[1]);
+    if (fechaPattern[2]) {
+      horaComprobante = fechaPattern[2].trim();
+      fechaHoraDisplay = `${fechaPattern[1]} ${horaComprobante}`;
     } else {
-      fechaHoraDisplay = mercantilFechaHora[1];
+      fechaHoraDisplay = fechaPattern[1];
     }
   } else {
-    // Bancamiga u otros: "FECHA: 21/10/26 11:23 am"
-    const fechaPattern = text.match(
-      /(?:fecha|date)[:\s]*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})(?:\s+([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?(?:\s*[AaPp][Mm])?))?/i
-    );
-    if (fechaPattern) {
-      fechaComprobante = formatCaracasDate(fechaPattern[1]);
-      if (fechaPattern[2]) {
-        horaComprobante = fechaPattern[2].trim();
-        fechaHoraDisplay = `${fechaPattern[1]} ${horaComprobante}`;
-      } else {
-        fechaHoraDisplay = fechaPattern[1];
+    for (let i = 0; i < lines.length; i++) {
+      if (/fecha/i.test(lines[i])) {
+        const candidate = lines[i + 1] || '';
+        const m = candidate.match(/\b([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})\b/);
+        if (m) {
+          fechaComprobante = formatCaracasDate(m[1]);
+          fechaHoraDisplay = m[1];
+          break;
+        }
       }
-    } else {
-      // Buscar cualquier fecha aislada DD/MM/YYYY
+    }
+    if (!fechaHoraDisplay) {
       const isolatedDate = text.match(/\b([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})\b/);
       if (isolatedDate) {
         fechaComprobante = formatCaracasDate(isolatedDate[1]);
@@ -387,41 +579,99 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
 
   // 6. CÉDULA O RIF
   let rifCedula = '';
-  // Etiquetas explícitas (soporta con o sin puntos: V-17.936.035 o V-17936035)
-  const rifMatch =
-    text.match(/(?:documento\s*de\s*identidad|ci\s*\/?\s*rif\s*beneficiario|ci\s*\/?\s*rif|ci|rif|c[ée]dula)[:\s]*([VvJjEeGg]-?[0-9]{1,2}(?:\.[0-9]{3}){2}(?:-[0-9])?|[VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?|[0-9]{1,2}(?:\.[0-9]{3}){2})/i) ||
-    text.match(/\b([VvJjEeGg]-?[0-9]{1,2}(?:\.[0-9]{3}){2}(?:-[0-9])?|[VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?)\b/);
-
-  if (rifMatch && rifMatch[1]) {
-    let rawRif = rifMatch[1].toUpperCase().trim();
-    if (!rawRif.startsWith('V-') && !rawRif.startsWith('J-') && !rawRif.startsWith('E-') && !rawRif.startsWith('G-')) {
-      if (/^[VJEG]/i.test(rawRif)) {
-        rawRif = `${rawRif[0]}-${rawRif.slice(1)}`;
-      } else {
-        rawRif = `V-${rawRif}`;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (
+      /(?:documento\s*de\s*identidad|ci\s*\/?\s*rif\s*beneficiario|ci\s*\/?\s*rif|ci|rif|c[ée]dula)\b/i.test(
+        line
+      )
+    ) {
+      const cand = line
+        .replace(
+          /^.*?(?:documento\s*de\s*identidad|ci\s*\/?\s*rif\s*beneficiario|ci\s*\/?\s*rif|ci|rif|c[ée]dula)[:\s]*/i,
+          ''
+        )
+        .trim();
+      const m =
+        cand.match(
+          /\b([VvJjEeGg]-?[0-9]{1,2}(?:\.[0-9]{3}){2}(?:-[0-9])?|[VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?|[0-9]{1,2}(?:\.[0-9]{3}){2})\b/
+        ) ||
+        (lines[i + 1] &&
+          lines[i + 1].match(
+            /\b([VvJjEeGg]-?[0-9]{1,2}(?:\.[0-9]{3}){2}(?:-[0-9])?|[VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?|[0-9]{1,2}(?:\.[0-9]{3}){2})\b/
+          ));
+      if (m) {
+        let rawRif = m[1].toUpperCase().trim();
+        if (
+          !rawRif.startsWith('V-') &&
+          !rawRif.startsWith('J-') &&
+          !rawRif.startsWith('E-') &&
+          !rawRif.startsWith('G-')
+        ) {
+          if (/^[VJEG]/i.test(rawRif)) {
+            rawRif = `${rawRif[0]}-${rawRif.slice(1)}`;
+          } else {
+            rawRif = `V-${rawRif}`;
+          }
+        }
+        rifCedula = rawRif;
+        break;
       }
     }
-    rifCedula = rawRif;
+  }
+
+  if (!rifCedula) {
+    const rawRifMatch = text.match(
+      /\b([VvJjEeGg]-?[0-9]{1,2}(?:\.[0-9]{3}){2}(?:-[0-9])?|[VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?)\b/
+    );
+    if (rawRifMatch) {
+      let rawRif = rawRifMatch[1].toUpperCase().trim();
+      if (
+        !rawRif.startsWith('V-') &&
+        !rawRif.startsWith('J-') &&
+        !rawRif.startsWith('E-') &&
+        !rawRif.startsWith('G-')
+      ) {
+        rawRif = `${rawRif[0]}-${rawRif.slice(1)}`;
+      }
+      rifCedula = rawRif;
+    }
   }
 
   // 7. TELÉFONO O BENEFICIARIO
   let telefonoNombreEmisor = '';
-  // Etiquetas explícitas
-  const phoneLabelMatch = text.match(
-    /(?:beneficiario|telf\s*beneficiario|tel[eé]fono|celular)[:\s]*([0-9\s-+]{10,16})/i
-  );
-
-  if (phoneLabelMatch && phoneLabelMatch[1]) {
-    const cleanP = phoneLabelMatch[1].replace(/[^0-9]/g, '');
-    if (cleanP.length >= 10) {
-      telefonoNombreEmisor = cleanP.startsWith('58') ? `+${cleanP}` : cleanP.startsWith('0') ? cleanP : `0${cleanP}`;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (
+      /(?:beneficiario|telf\s*beneficiario|tel[eé]fono|celular|n[uú]mero\s*celular)\b/i.test(line)
+    ) {
+      const cand = line
+        .replace(
+          /^.*?(?:beneficiario|telf\s*beneficiario|tel[eé]fono|celular|n[uú]mero\s*celular)[:\s]*/i,
+          ''
+        )
+        .trim();
+      const m =
+        cand.match(/([0-9\s-+]{10,16})/) ||
+        (lines[i + 1] && lines[i + 1].match(/([0-9\s-+]{10,16})/));
+      if (m) {
+        const cleanP = m[1].replace(/[^0-9]/g, '');
+        if (cleanP.length >= 10) {
+          telefonoNombreEmisor = cleanP.startsWith('58')
+            ? `+${cleanP}`
+            : cleanP.startsWith('0')
+            ? cleanP
+            : `0${cleanP}`;
+          break;
+        }
+      }
     }
   }
 
-  // Fallback si no tiene etiqueta: prefijo celular venezolano
   if (!telefonoNombreEmisor) {
-    const venPhone = text.match(/\b(0414|0424|0412|0416|0426)[- ]?[0-9]{7}\b/) ||
-                     text.match(/\b(?:\+?58)?(414|424|412|416|426)[- ]?[0-9]{7}\b/);
+    const venPhone =
+      text.match(/\b(0414|0424|0412|0416|0426)[- ]?[0-9]{7}\b/) ||
+      text.match(/\b(?:\+?58)?(414|424|412|416|426)[- ]?[0-9]{7}\b/);
     if (venPhone) {
       telefonoNombreEmisor = venPhone[0].replace(/[- ]/g, '');
       if (!telefonoNombreEmisor.startsWith('0') && !telefonoNombreEmisor.startsWith('+')) {
@@ -432,16 +682,24 @@ export function parseBankReceiptText(ocrText: string): ParsedBankReceipt {
 
   // 8. CUENTA ORIGEN
   let cuentaOrigen = '';
-  const cuentaMatch = text.match(/cuenta\s*origen[:\s]*([^\n\r,]+)/i);
-  if (cuentaMatch) {
-    cuentaOrigen = cuentaMatch[1].trim();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/cuenta\s*origen/i.test(line)) {
+      const rest = line.replace(/^.*?cuenta\s*origen[:\s]*/i, '').trim();
+      cuentaOrigen = rest || (lines[i + 1] ? lines[i + 1].trim() : '');
+      break;
+    }
   }
 
   // 9. CONCEPTO
   let concepto = '';
-  const conceptoMatch = text.match(/(?:concepto|motivo|memo|descripci[oó]n)[:\s]*([^\n\r]+)/i);
-  if (conceptoMatch) {
-    concepto = conceptoMatch[1].trim();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/(?:concepto|motivo|memo|descripci[oó]n)\b/i.test(line)) {
+      const rest = line.replace(/^.*?(?:concepto|motivo|memo|descripci[oó]n)[:\s]*/i, '').trim();
+      concepto = rest || (lines[i + 1] ? lines[i + 1].trim() : '');
+      break;
+    }
   }
 
   // 10. EVALUACIÓN DE ANOMALÍAS Y CONFIANZA
