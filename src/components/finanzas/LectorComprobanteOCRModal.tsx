@@ -35,6 +35,7 @@ import { DualEntity, BillingInvoice } from '../../types/finance';
 import { OcrForensicService } from '../../services/ocrForensicService';
 import { centsRound } from '../../services/financialAnalyticsService';
 import { sanitizeFirestorePayload } from '../../utils/sanitizeFirestorePayload';
+import { getCaracasToday } from '../../utils/bankReceiptParser';
 import { useAuth } from '../../context/AuthContext';
 
 interface LectorComprobanteOCRModalProps {
@@ -236,19 +237,23 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
       setBancoEmisor(result.bancoEmisor || '');
       setBancoReceptor(result.bancoReceptor || '');
       setNumeroReferencia(result.numeroReferencia || '');
-      setFechaComprobante(result.fechaComprobante || new Date().toISOString().split('T')[0]);
+      setFechaComprobante(result.fechaComprobante || getCaracasToday());
       setMonedaOriginal(result.monedaOriginal);
       setMontoOriginal(result.montoOriginal);
       setTasaBcvSnapshot(result.tasaBcvSnapshot);
 
       // Autocompletar Observaciones de Auditoría con los datos complementarios del comprobante
       const auditDetails = [
-        result.rifCedula ? `CI/RIF Emisor: ${result.rifCedula}` : '',
-        result.telefonoNombreEmisor ? `Tel: ${result.telefonoNombreEmisor}` : '',
-        result.bancoReceptor ? `Banco Destino: ${result.bancoReceptor}` : '',
-        result.fechaComprobante ? `Fecha: ${result.fechaComprobante}` : '',
-        result.dictamenVeracidad?.candado4_resumen || '',
-      ].filter(Boolean).join(' • ');
+        `Banco Emisor: ${result.bancoEmisor || 'N/A'}`,
+        `Banco Destino: ${result.bancoReceptor || 'N/A'}`,
+        `Fecha y Hora: ${result.fechaHoraDisplay || result.fechaComprobante || 'N/A'}`,
+        `Ref: ${result.numeroReferencia || 'N/A'}`,
+        `Beneficiario: ${result.telefonoNombreEmisor || 'N/A'}`,
+        `CI/RIF: ${result.rifCedula || 'N/A'}`,
+        `Cuenta Origen: ${result.cuentaOrigen || 'N/A'}`,
+        `Concepto: ${result.concepto || 'N/A'}`,
+        `Dictamen: ${result.dictamenVeracidad?.veredicto || 'N/A'} (${result.dictamenVeracidad?.score ?? 0}/100)`,
+      ].join(' • ');
       setNotasRevision(auditDetails);
 
       // Intentar vincular cliente sugerido si existe coincidencia de RIF, Cédula o Teléfono
@@ -564,6 +569,12 @@ export const LectorComprobanteOCRModal: React.FC<LectorComprobanteOCRModalProps>
                     <span className="font-bold">Candado 3:</span>
                     <span className="opacity-85">{dictamen.candado3_visual_gemini.detalle}</span>
                   </div>
+                  {analyzedRecord?.anomaliaSospechosa && dictamen.veredicto === 'SOSPECHOSO_REVISION_HUMANA' && (
+                    <div className="mt-2 p-2 rounded-lg bg-amber-900/40 border border-amber-600/50 text-[11px] text-amber-200">
+                      <strong className="block font-bold">⚠️ Criterio Técnico de Revisión:</strong>
+                      <span>{analyzedRecord.anomaliaSospechosa}</span>
+                    </div>
+                  )}
                   <div className="pt-1 text-[10px] font-mono opacity-60 truncate">
                     SHA-256: {analyzedRecord.sha256Bytes.substring(0, 24)}...
                   </div>

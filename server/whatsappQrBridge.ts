@@ -26,6 +26,7 @@ import zlib from 'zlib';
 import { GoogleGenAI } from '@google/genai';
 import { adminApp, adminAuth, adminDb, FieldValue, hasAdminCredentials } from './firebaseAdmin';
 import { sanitizeFirestorePayload } from '../src/utils/sanitizeFirestorePayload';
+import { parseBankReceiptText, parseVenezuelanOrInternationalAmount, formatCaracasDate, getCaracasToday } from '../src/utils/bankReceiptParser';
 
 export interface WhatsAppQrBridgeStatus {
   lineaId: string;
@@ -1409,147 +1410,10 @@ export async function deleteWhatsAppChatHandler(
 }
 
 /**
- * Extractor Heurístico y Determinista de Comprobantes Bancarios en Backend
- * Extrae metadatos estructurados sin requerir cuotas de APIs externas ni fallar ante microcortes
- */
-function extractReceiptHeuristicServer(base64OrText: string) {
-  let decodedText = base64OrText;
-  try {
-    if (base64OrText.length > 30 && !base64OrText.includes(' ')) {
-      const clean = base64OrText.replace(/^data:[^;]+;base64,/, '');
-      const bin = Buffer.from(clean, 'base64').toString('latin1');
-      const printable = bin.replace(/[^\x20-\x7E\xA0-\xFF]/g, ' ');
-      decodedText += ' ' + printable;
-    }
-  } catch {}
-
-  const lower = decodedText.toLowerCase();
-
-  // Tipo de comprobante
-  let tipoComprobante = 'PAGO_MOVIL';
-  if (lower.includes('zelle')) tipoComprobante = 'ZELLE';
-  else if (lower.includes('binance') || lower.includes('usdt') || lower.includes('cripto')) tipoComprobante = 'CRIPTOACTIVOS';
-  else if (lower.includes('retencion') || lower.includes('retención')) tipoComprobante = 'RETENCION_FISCAL';
-  else if (lower.includes('transferencia')) tipoComprobante = 'TRANSFERENCIA';
-
-  // Detección de bancos venezolanos e internacionales
-  let bancoEmisor = '';
-  let bancoReceptor = '';
-  const banks = [
-    { name: 'Bancamiga', match: /bancamiga/i },
-    { name: 'Banco de Venezuela', match: /banco\s+de\s+venezuela|bdv/i },
-    { name: 'Banesco', match: /banesco/i },
-    { name: 'Mercantil', match: /mercantil/i },
-    { name: 'BBVA Provincial', match: /provincial|bbva/i },
-    { name: 'Banco Nacional de Crédito', match: /bnc|banco\s+nacional\s+de\s+cr[eé]dito/i },
-    { name: 'Bancaribe', match: /bancaribe/i },
-    { name: 'Banco Bicentenario', match: /bicentenario/i },
-    { name: 'Banco del Tesoro', match: /tesoro/i },
-    { name: 'Banco Exterior', match: /exterior/i },
-    { name: '100% Banco', match: /100%\s*banco/i },
-    { name: 'Banplus', match: /banplus/i },
-    { name: 'Banco Activo', match: /activo/i },
-    { name: 'Banco Plaza', match: /plaza/i },
-    { name: 'Zelle', match: /zelle/i },
-    { name: 'Binance', match: /binance/i },
-  ];
-
-  const detectedBanks: string[] = [];
-  for (const b of banks) {
-    if (b.match.test(decodedText)) {
-      detectedBanks.push(b.name);
-    }
-  }
-
-  if (detectedBanks.length >= 2) {
-    bancoEmisor = detectedBanks[0];
-    bancoReceptor = detectedBanks[1];
-  } else if (detectedBanks.length === 1) {
-    bancoEmisor = detectedBanks[0];
-  }
-
-  // Monto y Moneda
-  let montoOriginal = 0;
-  let monedaOriginal: 'VES' | 'USD' = 'VES';
-  const vesMatch =
-    decodedText.match(/(?:bs\.?|ves|monto|total|pagado)[:\s]*([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})/i) ||
-    decodedText.match(/([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})\s*(?:bs|ves)/i);
-  const usdMatch =
-    decodedText.match(/(?:\$|usd)[:\s]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})/i) ||
-    decodedText.match(/([0-9]+(?:\.[0-9]{2}))\s*(?:usd|\$)/i);
-
-  if (vesMatch) {
-    const cleanMonto = vesMatch[1].replace(/\./g, '').replace(',', '.');
-    montoOriginal = parseFloat(cleanMonto) || 0;
-    monedaOriginal = 'VES';
-  } else if (usdMatch) {
-    const cleanMonto = usdMatch[1].replace(/,/g, '');
-    montoOriginal = parseFloat(cleanMonto) || 0;
-    monedaOriginal = 'USD';
-  } else {
-    const genericDec = decodedText.match(/([0-9]{1,6}[.,][0-9]{2})/);
-    if (genericDec) {
-      const valStr = genericDec[1].includes(',')
-        ? genericDec[1].replace(/\./g, '').replace(',', '.')
-        : genericDec[1];
-      montoOriginal = parseFloat(valStr) || 0;
-    }
-  }
-
-  // Número de Referencia
-  let numeroReferencia = '';
-  const refMatch =
-    decodedText.match(/(?:referencia|ref|nro|operaci[oó]n|transacci[oó]n|recibo|comprobante)[:\s#.]*([0-9A-Za-z]{6,16})/i) ||
-    decodedText.match(/\b([0-9]{10,14})\b/);
-  if (refMatch) {
-    numeroReferencia = refMatch[1].replace(/[^0-9A-Za-z]/g, '');
-  }
-
-  // RIF o Cédula
-  let rifCedula = '';
-  const rifMatch = decodedText.match(/\b([VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?)\b/);
-  if (rifMatch) {
-    const r = rifMatch[1].toUpperCase();
-    rifCedula = r.includes('-') ? r : `${r[0]}-${r.slice(1)}`;
-  }
-
-  // Teléfono
-  let telefonoNombreEmisor = '';
-  const phoneMatch =
-    decodedText.match(/\b(0414|0424|0412|0416|0426)[0-9]{7}\b/) ||
-    decodedText.match(/\b(?:\+?58)?(414|424|412|416|426)[0-9]{7}\b/);
-  if (phoneMatch) {
-    telefonoNombreEmisor = phoneMatch[0].startsWith('0')
-      ? phoneMatch[0]
-      : `0${phoneMatch[0].replace('+58', '')}`;
-  }
-
-  // Fecha
-  let fechaComprobante = '';
-  const dateMatch = decodedText.match(/\b([0-9]{1,2})[/-]([0-9]{1,2})[/-]([0-9]{2,4})\b/);
-  if (dateMatch) {
-    const day = dateMatch[1].padStart(2, '0');
-    const month = dateMatch[2].padStart(2, '0');
-    let year = dateMatch[3];
-    if (year.length === 2) year = `20${year}`;
-    fechaComprobante = `${year}-${month}-${day}`;
-  }
-
-  return {
-    tipoComprobante,
-    bancoEmisor,
-    bancoReceptor,
-    fechaComprobante: fechaComprobante || new Date().toISOString().split('T')[0],
-    numeroReferencia,
-    monedaOriginal,
-    montoOriginal,
-    rifCedula,
-    telefonoNombreEmisor,
-  };
-}
-
-/**
- * Analizador OCR de comprobantes bancarios mediante Gemini en el backend con fallback determinista de alta precisión
+ * Analizador OCR de comprobantes bancarios de Doble Capa:
+ * Capa 1: IA Multimodal Gemini Vision (gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash, gemini-flash-latest)
+ * Capa 2: Respaldo Óptico Real sobre Píxeles mediante Tesseract OCR local + Parser Bancario Nacional
+ * PROHIBIDO el uso de cadenas Base64 o selección de bancos aleatoria / por hash.
  */
 export async function analyzeReceiptOcrHandler(
   base64Clean: string,
@@ -1558,9 +1422,40 @@ export async function analyzeReceiptOcrHandler(
   const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
   const hasValidApiKey = Boolean(apiKey && apiKey.startsWith('AIzaSy') && apiKey.length >= 35);
 
-  // Si existe una API Key válida con formato oficial de Gemini, intentar análisis multimodal
+  // =========================================================================
+  // CAPA 1: IA Multimodal Gemini Vision en Backend
+  // =========================================================================
   if (hasValidApiKey) {
-    const candidateModels = ['gemini-flash-latest', 'gemini-3.5-flash-lite', 'gemini-3.8-flash'];
+    const candidateModels = [
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+      'gemini-flash-latest',
+    ];
+
+    const prompt = `Actúa como un Perito Forense Documental y Lector OCR para Comprobantes de Pago en Venezuela (Pago Móvil, Transferencia, Zelle, Binance, Criptoactivos, Retención Fiscal).
+Analiza con rigor óptico absoluto la imagen adjunta y extrae en formato estrictamente JSON:
+{
+  "esComprobanteValido": true,
+  "modalidad": "Pago Móvil" | "Transferencia" | "Zelle" | "Criptoactivos" | "Retención fiscal" | "Efectivo",
+  "bancoEmisor": "Nombre del banco emisor (ej. Mercantil Banco Universal, Bancamiga, Banesco, Banco de Venezuela, Provincial, BNC, etc.)",
+  "bancoReceptor": "Nombre del banco receptor o destino si aplica",
+  "codigoBancoDestino": "Código de 4 dígitos SUDEBAN si aplica (ej. 0172, 0102, 0134, etc.)",
+  "numeroReferencia": "Solo dígitos o alfanumérico exacto impreso en el comprobante (ej. 47362693, 112338509503)",
+  "monedaOriginal": "VES" | "USD",
+  "montoOriginal": 0.00,
+  "fechaComprobante": "DD/MM/YYYY o YYYY-MM-DD",
+  "horaComprobante": "HH:MM:SS AM/PM",
+  "rifCedulaBeneficiario": "Cédula o RIF detectado (ej. V-17.936.035 o V-11083828)",
+  "telefonoBeneficiario": "Teléfono del beneficiario detectado (ej. 0414-4604661 o 04145057900)",
+  "cuentaOrigen": "Cuenta de origen si está visible (ej. Cta. Ahorro *5349)",
+  "concepto": "Concepto o motivo del pago (ej. Yamilly Rojas)",
+  "indicadoresManipulacionVisual": []
+}
+REGLAS OBLIGATORIAS:
+1. Convierte montos venezolanos (ej. Bs. 44.238,00 o 8.833,96) a número decimal puro (44238.00 o 8833.96).
+2. Si un dato no está impreso en la imagen, déjalo como cadena vacía "". PROHIBIDO inventar datos o usar valores por defecto.`;
+
     for (const model of candidateModels) {
       try {
         const ai = new GoogleGenAI({
@@ -1569,26 +1464,8 @@ export async function analyzeReceiptOcrHandler(
             headers: { 'User-Agent': 'aistudio-build' },
           },
         });
-        const prompt = `Actúa como un Perito Forense Documental y Lector OCR para Comprobantes de Pago en Venezuela (Pago Móvil, Transferencia, Zelle, Binance, Criptoactivos).
-Analiza meticulosamente la imagen adjunta y extrae en formato estrictamente JSON:
-{
-  "tipoComprobante": "PAGO_MOVIL" | "TRANSFERENCIA" | "ZELLE" | "CRIPTOACTIVOS" | "RETENCION_FISCAL" | "RIF",
-  "bancoEmisor": "Nombre del banco emisor o plataforma (ej. Bancamiga, Banesco, Mercantil, BDV, BNC, Provincial, etc.)",
-  "bancoReceptor": "Nombre del banco receptor (ej. Banco de Venezuela, Banesco, etc.)",
-  "fechaComprobante": "YYYY-MM-DD",
-  "numeroReferencia": "Solo dígitos o alfanumérico de referencia (ej. 112338509503)",
-  "monedaOriginal": "VES" | "USD",
-  "montoOriginal": 0.00,
-  "rifCedula": "Cédula o RIF detectado (ej. V-11083828 o J-12345678-0)",
-  "telefonoNombreEmisor": "Teléfono o concepto asociado (ej. 04145057900)",
-  "consistenciaTipografica": true,
-  "halosDeColor": false,
-  "patronBancarioValido": true,
-  "analisisVisualDetalle": "Resumen conciso del peritaje forense"
-}
-IMPORTANTE: Si el monto está en formato venezolano con punto de miles y coma de decimales (ej. Bs. 8.833,96), conviértelo a número flotante 8833.96. Prohibido inventar datos si no son legibles.`;
 
-        const response: any = await ai.models.generateContent({
+        const response = await ai.models.generateContent({
           model,
           contents: [
             {
@@ -1612,49 +1489,114 @@ IMPORTANTE: Si el monto está en formato venezolano con punto de miles y coma de
 
         const text = response.text || '';
         const parsed = JSON.parse(text);
+
+        let tipoComprobante = 'PAGO_MOVIL';
+        const modLower = (parsed.modalidad || parsed.tipoComprobante || '').toLowerCase();
+        if (modLower.includes('zelle')) tipoComprobante = 'ZELLE';
+        else if (modLower.includes('cripto') || modLower.includes('binance')) tipoComprobante = 'CRIPTOACTIVOS';
+        else if (modLower.includes('retencion') || modLower.includes('retención')) tipoComprobante = 'RETENCION_FISCAL';
+        else if (modLower.includes('transferencia')) tipoComprobante = 'TRANSFERENCIA';
+
+        const rawAmount = String(parsed.montoOriginal || '');
+        const montoExacto = parseVenezuelanOrInternationalAmount(rawAmount);
+        const fechaNorm = formatCaracasDate(parsed.fechaComprobante);
+        const horaStr = parsed.horaComprobante || '';
+        const displayDateTime = horaStr ? `${parsed.fechaComprobante} ${horaStr}` : parsed.fechaComprobante;
+
         return {
           success: true,
           data: {
-            tipoComprobante: parsed.tipoComprobante || 'PAGO_MOVIL',
+            tipoComprobante,
             bancoEmisor: parsed.bancoEmisor || '',
             bancoReceptor: parsed.bancoReceptor || '',
-            fechaComprobante: parsed.fechaComprobante || new Date().toISOString().split('T')[0],
+            codigoBancoDestino: parsed.codigoBancoDestino || '',
+            fechaComprobante: fechaNorm,
+            horaComprobante: horaStr,
+            fechaHoraDisplay: displayDateTime,
             numeroReferencia: String(parsed.numeroReferencia || '').replace(/[^0-9A-Za-z]/g, ''),
             monedaOriginal: parsed.monedaOriginal === 'USD' ? 'USD' : 'VES',
-            montoOriginal: Number(parsed.montoOriginal) || 0,
-            rifCedula: parsed.rifCedula || '',
-            telefonoNombreEmisor: parsed.telefonoNombreEmisor || '',
-            consistenciaTipografica: parsed.consistenciaTipografica ?? true,
-            halosDeColor: parsed.halosDeColor ?? false,
-            patronBancarioValido: parsed.patronBancarioValido ?? true,
-            analisisVisualDetalle: parsed.analisisVisualDetalle || `Comprobante analizado con ${model}.`,
+            montoOriginal: montoExacto,
+            rifCedula: parsed.rifCedulaBeneficiario || parsed.rifCedula || '',
+            telefonoNombreEmisor: parsed.telefonoBeneficiario || parsed.telefonoNombreEmisor || '',
+            cuentaOrigen: parsed.cuentaOrigen || '',
+            concepto: parsed.concepto || '',
+            consistenciaTipografica: (parsed.indicadoresManipulacionVisual?.length || 0) === 0,
+            halosDeColor: false,
+            patronBancarioValido: parsed.esComprobanteValido ?? true,
+            analisisVisualDetalle: `Comprobante analizado con peritaje multimodal (${model}).`,
           },
         };
-      } catch (err: any) {
+      } catch (err) {
         console.debug(`[OCR Backend] Reintentando tras incidencia con ${model}:`, err?.message || err);
       }
     }
   }
 
-  // Fallback determinista y de alta precisión: Análisis local por patrones bancarios
-  const heuristic = extractReceiptHeuristicServer(base64Clean);
+  // =========================================================================
+  // CAPA 2: Respaldo Óptico Real sobre Píxeles mediante Tesseract OCR en Servidor
+  // =========================================================================
+  try {
+    const { createWorker } = await import('tesseract.js');
+    const worker = await createWorker('spa+eng');
+    const imageBuffer = Buffer.from(base64Clean, 'base64');
+    const ret = await worker.recognize(imageBuffer);
+    await worker.terminate();
+
+    const ocrRawText = ret?.data?.text || '';
+    if (ocrRawText.trim().length > 10) {
+      const parsed = parseBankReceiptText(ocrRawText);
+      if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
+        return {
+          success: true,
+          data: {
+            tipoComprobante: parsed.tipoComprobante,
+            bancoEmisor: parsed.bancoEmisor,
+            bancoReceptor: parsed.bancoReceptor,
+            codigoBancoDestino: parsed.codigoBancoDestino,
+            fechaComprobante: parsed.fechaComprobante,
+            horaComprobante: parsed.horaComprobante,
+            fechaHoraDisplay: parsed.fechaHoraDisplay,
+            numeroReferencia: parsed.numeroReferencia,
+            monedaOriginal: parsed.monedaOriginal,
+            montoOriginal: parsed.montoOriginal,
+            rifCedula: parsed.rifCedula,
+            telefonoNombreEmisor: parsed.telefonoNombreEmisor,
+            cuentaOrigen: parsed.cuentaOrigen,
+            concepto: parsed.concepto,
+            consistenciaTipografica: true,
+            halosDeColor: false,
+            patronBancarioValido: true,
+            analisisVisualDetalle: 'Extracción óptica de píxeles mediante Tesseract OCR local con parser bancario nacional.',
+          },
+        };
+      }
+    }
+  } catch (tessErr) {
+    console.debug('[OCR Backend] Motor Tesseract local no disponible:', tessErr?.message || tessErr);
+  }
+
+  // Fallback Defensivo Cero Mock Data: Si no se pudo leer la imagen, devolver campos limpios sin datos inventados
   return {
     success: true,
     data: {
-      tipoComprobante: heuristic.tipoComprobante || 'PAGO_MOVIL',
-      bancoEmisor: heuristic.bancoEmisor || '',
-      bancoReceptor: heuristic.bancoReceptor || '',
-      fechaComprobante: heuristic.fechaComprobante || new Date().toISOString().split('T')[0],
-      numeroReferencia: heuristic.numeroReferencia || '',
-      monedaOriginal: heuristic.monedaOriginal || 'VES',
-      montoOriginal: heuristic.montoOriginal || 0,
-      rifCedula: heuristic.rifCedula || '',
-      telefonoNombreEmisor: heuristic.telefonoNombreEmisor || '',
+      tipoComprobante: 'PAGO_MOVIL',
+      bancoEmisor: '',
+      bancoReceptor: '',
+      codigoBancoDestino: '',
+      fechaComprobante: getCaracasToday(),
+      horaComprobante: '',
+      fechaHoraDisplay: '',
+      numeroReferencia: '',
+      monedaOriginal: 'VES',
+      montoOriginal: 0,
+      rifCedula: '',
+      telefonoNombreEmisor: '',
+      cuentaOrigen: '',
+      concepto: '',
       consistenciaTipografica: true,
       halosDeColor: false,
-      patronBancarioValido: true,
-      analisisVisualDetalle:
-        'Extracción determinista de alta precisión (Modo Autónomo Local sin cuota externa).',
+      patronBancarioValido: false,
+      analisisVisualDetalle: 'No se detectó texto legible en el comprobante. Por favor ingrese los datos manualmente.',
     },
   };
 }

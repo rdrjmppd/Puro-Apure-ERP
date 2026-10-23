@@ -53,7 +53,7 @@ export interface PagoReportadoOCR {
   tipoComprobante: TipoComprobanteOCR;
   bancoEmisor?: string;
   bancoReceptor?: string;
-  fechaComprobante: string; // YYYY-MM-DD o formato extraído
+  fechaComprobante: string; // YYYY-MM-DD
   numeroReferencia: string;
   referenciaNormalizada: string; // Alfanumérica en mayúsculas sin espacios
   monedaOriginal: 'VES' | 'USD';
@@ -63,6 +63,12 @@ export interface PagoReportadoOCR {
   montoEquivalenteVES: number;
   rifCedula?: string;
   telefonoNombreEmisor?: string;
+  codigoBancoDestino?: string;
+  cuentaOrigen?: string;
+  concepto?: string;
+  horaComprobante?: string;
+  fechaHoraDisplay?: string;
+  anomaliaSospechosa?: string;
 
   // Cruce y Pre-Conciliación Contable
   clienteIdSugerido?: string;

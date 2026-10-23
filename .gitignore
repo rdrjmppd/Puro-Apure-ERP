@@ -11,3 +11,5 @@ serviceAccountKey.json
 scratch/
 bun.lock
 bun.lockb
+pending_ocr_queue.json
+pending_queue.json

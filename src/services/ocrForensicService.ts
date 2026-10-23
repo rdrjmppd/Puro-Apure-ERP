@@ -28,6 +28,14 @@ import {
   TipoComprobanteOCR,
 } from '../types/ocrForensic';
 import { PaymentRecord, BillingInvoice } from '../types/finance';
+import {
+  parseBankReceiptText,
+  parseVenezuelanOrInternationalAmount,
+  formatCaracasDate,
+  getCaracasToday,
+  isFutureCaracasDate,
+  isDateOlderThanDays,
+} from '../utils/bankReceiptParser';
 
 const PAGOS_REPORTADOS_COLLECTION = 'pagos_reportados_ocr';
 const PAYMENTS_COLLECTION = 'payments';
@@ -206,37 +214,196 @@ export function normalizeBankReference(ref: string): string {
   return ref.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
-/**
- * Evalúa determinísticamente el puntaje de veracidad (0 a 100) y asigna el veredicto del semáforo forense
- */
-export function evaluateVeracityScore(params: {
+
+export interface VeracityEvaluationParams {
   esDuplicado: boolean;
+  hashDuplicado?: string;
+  referenciaDuplicada?: string;
   tieneFirmasIAOEdicion: boolean;
-  consistenciaTipografica: boolean;
-  halosDeColor: boolean;
-  patronBancarioValido: boolean;
+  softwareDetectado?: string;
+  consistenciaTipografica?: boolean;
+  halosDeColor?: boolean;
+  patronBancarioValido?: boolean;
+  bancoReconocido?: boolean;
+  bancoEmisor?: string;
+  bancoReceptor?: string;
   hasReference?: boolean;
+  numeroReferencia?: string;
   hasValidAmount?: boolean;
-}): { score: number; veredicto: VeredictoVeracidad } {
-  let score = 100;
-  if (params.esDuplicado) score -= 70;
-  if (params.tieneFirmasIAOEdicion) score -= 35;
-  if (!params.consistenciaTipografica) score -= 30;
-  if (params.halosDeColor) score -= 25;
-  if (!params.patronBancarioValido) score -= 20;
-  if (params.hasReference === false) score -= 15;
-  if (params.hasValidAmount === false) score -= 20;
+  montoOriginal?: number;
+  fechaComprobante?: string;
+  isDateInFuture?: boolean;
+  isDateTooOld?: boolean;
+  hasBeneficiaryData?: boolean;
+  rifCedula?: string;
+  telefonoNombreEmisor?: string;
+  isLowResolution?: boolean;
+  anomaliasExtra?: string[];
+}
 
-  score = Math.max(0, Math.min(100, score));
+/**
+ * Recalibración de la Matriz Matemática de Veracidad Forense (Base 100 Puntos)
+ * - Candado 1: Unicidad Criptográfica y Contable (30 pts) [Reciclaje: -85 pts]
+ * - Candado 2: Integridad Binaria EXIF / JFIF / PNG Anti-IA y Anti-Edición (30 pts) [IA/Edición: -80 pts]
+ * - Candado 3: Coherencia Matemática, Bancaria y Estructural (40 pts)
+ *   * Banco reconocido: +10 pts
+ *   * Referencia válida: +10 pts
+ *   * Monto positivo (> 0): +10 pts
+ *   * Fecha válida (no futura) + Beneficiario: +10 pts
+ * Sin penalizaciones por ausencia de EXIF en capturas de pantalla o WhatsApp.
+ */
+export function evaluateVeracityScore(params: VeracityEvaluationParams): {
+  score: number;
+  veredicto: VeredictoVeracidad;
+  detalles: {
+    candado1: string;
+    candado2: string;
+    candado3: string;
+    candado4_resumen: string;
+  };
+  anomalias: string[];
+} {
+  const anomalias: string[] = [];
 
-  let veredicto: VeredictoVeracidad = 'AUTENTICO_ALTA_CONFIANZA';
-  if (score < 50 || params.esDuplicado) {
-    veredicto = 'ALERTA_FRAUDE_EDICION_O_IA';
-  } else if (score < 85) {
-    veredicto = 'SOSPECHOSO_REVISION_HUMANA';
+  // =========================================================================
+  // Candado 1: Unicidad Criptográfica y Contable (Peso 30 puntos)
+  // =========================================================================
+  let c1Score = 30;
+  let c1Detalle = 'Candado 1: Comprobante y referencia únicos en el sistema contable (+30 pts).';
+  if (params.esDuplicado) {
+    c1Score = -55; // Aplica penalización de -85 pts
+    c1Detalle = `Candado 1 [ALERTA RECICLAJE]: Comprobante o referencia (${params.referenciaDuplicada || params.hashDuplicado || 'Duplicado'}) ya registrada previamente.`;
+    anomalias.push('Comprobante o referencia bancaria reciclada/duplicada.');
   }
 
-  return { score, veredicto };
+  // =========================================================================
+  // Candado 2: Integridad Binaria Anti-IA y Anti-Edición (Peso 30 puntos)
+  // =========================================================================
+  let c2Score = 30;
+  let c2Detalle = 'Candado 2: Cabeceras binarias limpias sin rastros de edición ni IA generativa (+30 pts).';
+  if (params.tieneFirmasIAOEdicion) {
+    c2Score = -50; // Aplica penalización de -80 pts
+    c2Detalle = `Candado 2 [ALERTA FRAUDE EDICIÓN/IA]: Detectada firma de software de edición o IA (${params.softwareDetectado || 'Edición detectada'}).`;
+    anomalias.push(`Metadatos con firma de software no autorizado: ${params.softwareDetectado || 'Edición detectada'}.`);
+  }
+
+  // =========================================================================
+  // Candado 3: Coherencia Matemática, Bancaria y Estructural (Peso 40 puntos)
+  // =========================================================================
+  let c3Score = 0;
+  const c3Items: string[] = [];
+
+  // Banco emisor o receptor válido reconocido (+10 pts)
+  const isBankRecognized = params.bancoReconocido !== false && params.patronBancarioValido !== false;
+  if (isBankRecognized) {
+    c3Score += 10;
+    c3Items.push('Banco verificado (+10)');
+  } else {
+    anomalias.push('Banco emisor o receptor no identificado con precisión (-10 pts).');
+  }
+
+  // Número de referencia válido extraído (+10 pts)
+  const hasRefExplicitFalse = params.hasReference === false;
+  const hasRefValue = typeof params.numeroReferencia === 'string';
+  const isDummyRef = hasRefValue && /^(0{6,}|123456\d*)$/.test(params.numeroReferencia || '');
+  const isRefInvalid = hasRefExplicitFalse || (hasRefValue && (params.numeroReferencia!.length < 6 || isDummyRef));
+
+  if (!isRefInvalid) {
+    c3Score += 10;
+    c3Items.push('Referencia válida (+10)');
+  } else {
+    anomalias.push('Número de referencia no detectado o formato inválido (-10 pts).');
+  }
+
+  // Monto numérico positivo y con formato monetario coherente (+10 pts)
+  const hasAmountExplicitFalse = params.hasValidAmount === false;
+  const hasAmountValue = typeof params.montoOriginal === 'number';
+  const isAmountInvalid = hasAmountExplicitFalse || (hasAmountValue && params.montoOriginal! <= 0);
+
+  if (!isAmountInvalid) {
+    c3Score += 10;
+    c3Items.push('Monto válido (+10)');
+  } else {
+    anomalias.push('Monto del comprobante no legible o igual a cero (-10 pts).');
+  }
+
+  // Fecha y datos de beneficiario/cédula/teléfono (+10 pts)
+  const isFuture = params.isDateInFuture === true;
+  const isOld = params.isDateTooOld === true;
+  const hasBeneficiaryInvalid = params.hasBeneficiaryData === false;
+
+  if (!hasBeneficiaryInvalid) {
+    c3Score += 10;
+    c3Items.push('Fecha y beneficiario presentes (+10)');
+  } else {
+    anomalias.push('Datos del beneficiario o titular ausentes (-10 pts).');
+  }
+
+  // Penalizaciones objetivas específicas de Candado 3
+  if (params.consistenciaTipografica === false) {
+    c3Score -= 25;
+    anomalias.push('Inconsistencia en la tipografía o alineación de caracteres (-25 pts).');
+  }
+  if (params.halosDeColor === true) {
+    c3Score -= 25;
+    anomalias.push('Halos de color o artefactos de compresión sospechosos alrededor del texto (-25 pts).');
+  }
+  if (isFuture) {
+    c3Score -= 25;
+    anomalias.push('Fecha del comprobante está en el futuro respecto a la hora de Venezuela (-25 pts).');
+  }
+  if (isOld) {
+    c3Score -= 25;
+    anomalias.push('Comprobante tiene más de 90 días de antigüedad (-25 pts).');
+  }
+  if (params.isLowResolution === true) {
+    c3Score -= 25;
+    anomalias.push('Resolución extremadamente baja (< 200x200 px) o aspecto distorsionado (-25 pts).');
+  }
+
+  if (params.anomaliasExtra) {
+    for (const a of params.anomaliasExtra) {
+      if (!anomalias.includes(a)) anomalias.push(a);
+    }
+  }
+
+  const rawTotal = c1Score + c2Score + c3Score;
+
+  // Asignación de veredicto según los umbrales especificados
+  let score = rawTotal;
+  let veredicto: VeredictoVeracidad = 'AUTENTICO_ALTA_CONFIANZA';
+
+  if (params.esDuplicado) {
+    score = Math.min(15, Math.max(5, rawTotal));
+    veredicto = 'ALERTA_FRAUDE_EDICION_O_IA';
+  } else if (params.tieneFirmasIAOEdicion) {
+    score = Math.min(20, Math.max(5, rawTotal));
+    veredicto = 'ALERTA_FRAUDE_EDICION_O_IA';
+  } else {
+    score = Math.max(0, Math.min(100, rawTotal));
+    if (score >= 85) {
+      veredicto = 'AUTENTICO_ALTA_CONFIANZA';
+    } else if (score >= 50) {
+      veredicto = 'SOSPECHOSO_REVISION_HUMANA';
+    } else {
+      veredicto = 'ALERTA_FRAUDE_EDICION_O_IA';
+    }
+  }
+
+  const c3Detalle = `Candado 3: ${c3Items.join(', ') || 'Extracción parcial'}. ${anomalias.length > 0 ? `Anomalías: ${anomalias.join(' • ')}` : 'Estructura bancaria íntegra.'}`;
+  const c4Resumen = `Dictamen: ${veredicto} (Puntaje: ${score}/100). ${c1Detalle} ${c2Detalle}`;
+
+  return {
+    score,
+    veredicto,
+    detalles: {
+      candado1: c1Detalle,
+      candado2: c2Detalle,
+      candado3: c3Detalle,
+      candado4_resumen: c4Resumen,
+    },
+    anomalias,
+  };
 }
 
 export class OcrForensicService {
@@ -271,7 +438,20 @@ export class OcrForensicService {
       }
     }
 
-    const binaryStr = atob(base64Clean);
+    let isLowRes = false;
+    if (typeof window !== 'undefined' && typeof Image !== 'undefined') {
+      try {
+        const imgProbe = new Image();
+        imgProbe.src = base64Data.startsWith('data:') ? base64Data : `data:${mimeType || 'image/jpeg'};base64,${base64Clean}`;
+        if (imgProbe.width > 0 && imgProbe.height > 0) {
+          if (imgProbe.width < 200 || imgProbe.height < 200) {
+            isLowRes = true;
+          }
+        }
+      } catch {}
+    }
+
+    const binaryStr = typeof atob !== 'undefined' ? atob(base64Clean) : Buffer.from(base64Clean, 'base64').toString('binary');
     const bytes = new Uint8Array(binaryStr.length);
     for (let i = 0; i < binaryStr.length; i++) {
       bytes[i] = binaryStr.charCodeAt(i);
@@ -284,71 +464,81 @@ export class OcrForensicService {
     // 3. Candado 2: Inspección Binaria de EXIF
     const exifAudit = inspectExifAndMagicBytes(bytes);
 
-    // 4. Extracción Multimodal con Gemini Vision API (o fallback de dominio regex)
+    // 4. Extracción Óptica Real de Doble Capa (Gemini Vision / Tesseract en Píxeles)
     const visionResult = await this.extractWithGeminiVision(base64Clean, mimeType);
 
     const refNorm = normalizeBankReference(visionResult.numeroReferencia || '');
 
     // 5. Candado 1: Anti-Reciclaje de Imagen y Referencia
     let isDuplicate = false;
-    let duplicateDetail = 'Comprobante y referencia únicos en el sistema.';
     let matchedRef = '';
 
     for (const rec of existingRecords) {
       if (rec.sha256Bytes === sha256) {
         isDuplicate = true;
-        duplicateDetail = `Alerta de Reciclaje: Imagen de comprobante exactamente idéntica a pago previo (${rec.id}).`;
         break;
       }
       if (refNorm && refNorm.length >= 6 && rec.referenciaNormalizada === refNorm) {
         isDuplicate = true;
         matchedRef = refNorm;
-        duplicateDetail = `Alerta de Reciclaje: Número de referencia bancaria (${refNorm}) ya utilizado en pago previo (${rec.id}).`;
         break;
       }
       const dist = calculateHammingDistance(pHash, rec.pHash);
       if (dist <= 6) {
         isDuplicate = true;
-        duplicateDetail = `Alerta de Reciclaje Visual: Hash perceptual muy similar (distancia Hamming ${dist} <= 6) al pago previo (${rec.id}).`;
         break;
       }
     }
 
-    // 6. Candado 4: Cálculo Determinista del Score de Veracidad (0 a 100)
-    let score = 100;
-    if (isDuplicate) score -= 70;
-    if (exifAudit.tieneFirmasIAOEdicion) score -= 35;
-    if (!visionResult.consistenciaTipografica) score -= 30;
-    if (visionResult.halosDeColor) score -= 25;
-    if (!visionResult.patronBancarioValido) score -= 20;
-    if (!visionResult.numeroReferencia || visionResult.numeroReferencia.length < 4) score -= 15;
-    if (!visionResult.montoOriginal || visionResult.montoOriginal <= 0) score -= 20;
+    // 6. Validación de Coherencia Temporal en America/Caracas
+    const isFuture = isFutureCaracasDate(visionResult.fechaComprobante);
+    const isOld = isDateOlderThanDays(visionResult.fechaComprobante, 90);
 
-    score = Math.max(0, Math.min(100, score));
-
-    let veredicto: VeredictoVeracidad = 'AUTENTICO_ALTA_CONFIANZA';
-    if (score < 50 || isDuplicate) {
-      veredicto = 'ALERTA_FRAUDE_EDICION_O_IA';
-    } else if (score < 85) {
-      veredicto = 'SOSPECHOSO_REVISION_HUMANA';
-    }
+    // 7. Candado 4: Cálculo Determinista del Score de Veracidad (0 a 100)
+    const veracity = evaluateVeracityScore({
+      esDuplicado: isDuplicate,
+      hashDuplicado: isDuplicate ? sha256 : undefined,
+      referenciaDuplicada: matchedRef || undefined,
+      tieneFirmasIAOEdicion: exifAudit.tieneFirmasIAOEdicion,
+      softwareDetectado: exifAudit.softwareDetectado,
+      consistenciaTipografica: visionResult.consistenciaTipografica,
+      halosDeColor: visionResult.halosDeColor,
+      patronBancarioValido: visionResult.patronBancarioValido,
+      bancoReconocido: Boolean(visionResult.bancoEmisor || visionResult.bancoReceptor),
+      bancoEmisor: visionResult.bancoEmisor,
+      bancoReceptor: visionResult.bancoReceptor,
+      hasReference: Boolean(visionResult.numeroReferencia && visionResult.numeroReferencia.length >= 6),
+      numeroReferencia: visionResult.numeroReferencia,
+      hasValidAmount: Boolean(visionResult.montoOriginal && visionResult.montoOriginal > 0),
+      montoOriginal: visionResult.montoOriginal,
+      fechaComprobante: visionResult.fechaComprobante,
+      isDateInFuture: isFuture,
+      isDateTooOld: isOld,
+      hasBeneficiaryData: Boolean(visionResult.rifCedula || visionResult.telefonoNombreEmisor),
+      isLowResolution: isLowRes,
+    });
 
     const dictamen: DictamenVeracidadOCR = {
-      veredicto,
-      score,
+      veredicto: veracity.veredicto,
+      score: veracity.score,
       candado1_reciclaje: {
         esDuplicado: isDuplicate,
+        hashDuplicado: isDuplicate ? sha256 : undefined,
         referenciaDuplicada: matchedRef || undefined,
-        detalle: duplicateDetail,
+        detalle: veracity.detalles.candado1,
       },
-      candado2_exif_ia: exifAudit,
+      candado2_exif_ia: {
+        tieneFirmasIAOEdicion: exifAudit.tieneFirmasIAOEdicion,
+        softwareDetectado: exifAudit.softwareDetectado,
+        detalle: veracity.detalles.candado2,
+      },
       candado3_visual_gemini: {
         consistenciaTipografica: visionResult.consistenciaTipografica,
         halosDeColor: visionResult.halosDeColor,
         patronBancarioValido: visionResult.patronBancarioValido,
-        detalle: visionResult.analisisVisualDetalle,
+        detalle: veracity.detalles.candado3,
       },
-      candado4_resumen: `Dictamen: ${veredicto} (Puntaje: ${score}/100). ${duplicateDetail} ${exifAudit.detalle}`,
+      candado4_resumen: veracity.detalles.candado4_resumen,
       tiempoAnalisisMs: Date.now() - startTime,
     };
 
@@ -366,7 +556,10 @@ export class OcrForensicService {
       tipoComprobante: visionResult.tipoComprobante || 'PAGO_MOVIL',
       bancoEmisor: visionResult.bancoEmisor || '',
       bancoReceptor: visionResult.bancoReceptor || '',
-      fechaComprobante: visionResult.fechaComprobante || new Date().toISOString().split('T')[0],
+      codigoBancoDestino: visionResult.codigoBancoDestino || '',
+      fechaComprobante: visionResult.fechaComprobante || getCaracasToday(),
+      horaComprobante: visionResult.horaComprobante || '',
+      fechaHoraDisplay: visionResult.fechaHoraDisplay || visionResult.fechaComprobante,
       numeroReferencia: visionResult.numeroReferencia || '',
       referenciaNormalizada: refNorm || '',
       monedaOriginal: visionResult.monedaOriginal || 'VES',
@@ -376,6 +569,9 @@ export class OcrForensicService {
       montoEquivalenteVES: montoVES,
       rifCedula: visionResult.rifCedula || '',
       telefonoNombreEmisor: visionResult.telefonoNombreEmisor || '',
+      cuentaOrigen: visionResult.cuentaOrigen || '',
+      concepto: visionResult.concepto || '',
+      anomaliaSospechosa: veracity.anomalias.length > 0 ? veracity.anomalias.join(' • ') : undefined,
       dictamenVeracidad: dictamen,
       estadoConciliacion: 'pendiente_revision',
       createdTimestamp: Date.now(),
@@ -386,7 +582,10 @@ export class OcrForensicService {
   }
 
   /**
-   * Extracción inteligente mediante Gemini Vision API con tolerancia a fallos y fallback determinista
+   * Extracción Óptica Real de Doble Capa:
+   * Capa 1: Endpoint Proxy Gemini Vision en Backend (/api/ocr-analyze)
+   * Capa 2: Tesseract OCR sobre los píxeles reales en Cliente con Parser Bancario
+   * PROHIBIDO inventar datos a partir de substrings del Base64 crudo.
    */
   private static async extractWithGeminiVision(
     base64Clean: string,
@@ -395,20 +594,22 @@ export class OcrForensicService {
     tipoComprobante: TipoComprobanteOCR;
     bancoEmisor?: string;
     bancoReceptor?: string;
+    codigoBancoDestino?: string;
     fechaComprobante: string;
+    horaComprobante?: string;
+    fechaHoraDisplay?: string;
     numeroReferencia: string;
     monedaOriginal: 'VES' | 'USD';
     montoOriginal: number;
     rifCedula?: string;
     telefonoNombreEmisor?: string;
+    cuentaOrigen?: string;
+    concepto?: string;
     consistenciaTipografica: boolean;
     halosDeColor: boolean;
     patronBancarioValido: boolean;
     analisisVisualDetalle: string;
   }> {
-    // 0. Pre-extracción heurística determinista local de alta precisión
-    const heuristic = OcrForensicService.extractReceiptHeuristic(base64Clean);
-
     // 1. Intentar vía endpoint proxy seguro del backend (/api/ocr-analyze)
     if (typeof window !== 'undefined') {
       try {
@@ -421,45 +622,71 @@ export class OcrForensicService {
           const resJson = await resp.json();
           if (resJson.success && resJson.data) {
             const d = resJson.data;
-            return {
-              tipoComprobante: d.tipoComprobante || heuristic.tipoComprobante || 'PAGO_MOVIL',
-              bancoEmisor: d.bancoEmisor || heuristic.bancoEmisor || '',
-              bancoReceptor: d.bancoReceptor || heuristic.bancoReceptor || '',
-              fechaComprobante: d.fechaComprobante || heuristic.fechaComprobante || new Date().toISOString().split('T')[0],
-              numeroReferencia: String(d.numeroReferencia || heuristic.numeroReferencia || '').replace(/[^0-9A-Za-z]/g, ''),
-              monedaOriginal: d.monedaOriginal === 'USD' || heuristic.monedaOriginal === 'USD' ? 'USD' : 'VES',
-              montoOriginal: Number(d.montoOriginal) || heuristic.montoOriginal || 0,
-              rifCedula: d.rifCedula || heuristic.rifCedula || '',
-              telefonoNombreEmisor: d.telefonoNombreEmisor || heuristic.telefonoNombreEmisor || '',
-              consistenciaTipografica: d.consistenciaTipografica ?? true,
-              halosDeColor: d.halosDeColor ?? false,
-              patronBancarioValido: d.patronBancarioValido ?? true,
-              analisisVisualDetalle: d.analisisVisualDetalle || 'Comprobante analizado con peritaje multimodal.',
-            };
+            if (d.bancoEmisor || d.numeroReferencia || Number(d.montoOriginal) > 0) {
+              return {
+                tipoComprobante: d.tipoComprobante || 'PAGO_MOVIL',
+                bancoEmisor: d.bancoEmisor || '',
+                bancoReceptor: d.bancoReceptor || '',
+                codigoBancoDestino: d.codigoBancoDestino || '',
+                fechaComprobante: d.fechaComprobante || getCaracasToday(),
+                horaComprobante: d.horaComprobante || '',
+                fechaHoraDisplay: d.fechaHoraDisplay || d.fechaComprobante,
+                numeroReferencia: String(d.numeroReferencia || '').replace(/[^0-9A-Za-z]/g, ''),
+                monedaOriginal: d.monedaOriginal === 'USD' ? 'USD' : 'VES',
+                montoOriginal: parseVenezuelanOrInternationalAmount(String(d.montoOriginal || 0)),
+                rifCedula: d.rifCedula || '',
+                telefonoNombreEmisor: d.telefonoNombreEmisor || '',
+                cuentaOrigen: d.cuentaOrigen || '',
+                concepto: d.concepto || '',
+                consistenciaTipografica: d.consistenciaTipografica ?? true,
+                halosDeColor: d.halosDeColor ?? false,
+                patronBancarioValido: d.patronBancarioValido ?? true,
+                analisisVisualDetalle: d.analisisVisualDetalle || 'Comprobante analizado con peritaje multimodal.',
+              };
+            }
           }
         }
       } catch (proxyErr) {
-        console.debug('[OcrForensicService] Proxy backend no disponible, intentando cliente directo:', proxyErr);
+        console.debug('[OcrForensicService] Proxy backend no disponible, intentando OCR cliente:', proxyErr);
       }
     }
 
-    // 2. Fallback Heurístico Determinista de Alta Precisión si el comprobante tiene datos legibles (modo local offline)
-    if (heuristic.hasData) {
-      return {
-        tipoComprobante: heuristic.tipoComprobante || 'PAGO_MOVIL',
-        bancoEmisor: heuristic.bancoEmisor || '',
-        bancoReceptor: heuristic.bancoReceptor || '',
-        fechaComprobante: heuristic.fechaComprobante || new Date().toISOString().split('T')[0],
-        numeroReferencia: heuristic.numeroReferencia || '',
-        monedaOriginal: heuristic.monedaOriginal || 'VES',
-        montoOriginal: heuristic.montoOriginal || 0,
-        rifCedula: heuristic.rifCedula || '',
-        telefonoNombreEmisor: heuristic.telefonoNombreEmisor || '',
-        consistenciaTipografica: true,
-        halosDeColor: false,
-        patronBancarioValido: true,
-        analisisVisualDetalle: 'Extracción determinista de alta precisión: datos bancarios verificados en comprobante.',
-      };
+    // 2. Capa Secundaria: Reconocimiento Óptico Real sobre Píxeles en Cliente (Tesseract.js)
+    try {
+      const { createWorker } = await import('tesseract.js');
+      const worker = await createWorker('spa+eng');
+      const imagePayload = base64Clean.startsWith('data:') ? base64Clean : `data:${mimeType || 'image/jpeg'};base64,${base64Clean}`;
+      const ret = await worker.recognize(imagePayload);
+      await worker.terminate();
+
+      const ocrRawText = ret?.data?.text || '';
+      if (ocrRawText.trim().length > 10) {
+        const parsed = parseBankReceiptText(ocrRawText);
+        if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
+          return {
+            tipoComprobante: parsed.tipoComprobante,
+            bancoEmisor: parsed.bancoEmisor,
+            bancoReceptor: parsed.bancoReceptor,
+            codigoBancoDestino: parsed.codigoBancoDestino,
+            fechaComprobante: parsed.fechaComprobante,
+            horaComprobante: parsed.horaComprobante,
+            fechaHoraDisplay: parsed.fechaHoraDisplay,
+            numeroReferencia: parsed.numeroReferencia,
+            monedaOriginal: parsed.monedaOriginal,
+            montoOriginal: parsed.montoOriginal,
+            rifCedula: parsed.rifCedula,
+            telefonoNombreEmisor: parsed.telefonoNombreEmisor,
+            cuentaOrigen: parsed.cuentaOrigen,
+            concepto: parsed.concepto,
+            consistenciaTipografica: true,
+            halosDeColor: false,
+            patronBancarioValido: true,
+            analisisVisualDetalle: 'Extracción óptica de píxeles mediante Tesseract OCR local en cliente.',
+          };
+        }
+      }
+    } catch (clientTessErr) {
+      console.debug('[OcrForensicService] Tesseract cliente no pudo procesar imagen:', clientTessErr);
     }
 
     // Fallback defensivo Cero Mock Data: Nunca inventar cifras ni bancos ficticios
@@ -467,169 +694,24 @@ export class OcrForensicService {
       tipoComprobante: 'PAGO_MOVIL',
       bancoEmisor: '',
       bancoReceptor: '',
-      fechaComprobante: new Date().toISOString().split('T')[0],
+      codigoBancoDestino: '',
+      fechaComprobante: getCaracasToday(),
+      horaComprobante: '',
+      fechaHoraDisplay: '',
       numeroReferencia: '',
       monedaOriginal: 'VES',
       montoOriginal: 0,
+      rifCedula: '',
+      telefonoNombreEmisor: '',
+      cuentaOrigen: '',
+      concepto: '',
       consistenciaTipografica: true,
       halosDeColor: false,
-      patronBancarioValido: true,
-      analisisVisualDetalle: 'Extracción visual no concluyente o sin conexión a IA. Por favor verifique e introduzca los datos manualmente.',
+      patronBancarioValido: false,
+      analisisVisualDetalle: 'Extracción visual no concluyente. Por favor verifique e introduzca los datos manualmente.',
     };
   }
 
-  /**
-   * Extractor Heurístico y Resiliente de Comprobantes Bancarios (Nacional e Internacional)
-   * Inspecciona secuencias de texto legibles dentro de los bytes del comprobante (EXIF, OCR previo o text streams)
-   */
-  public static extractReceiptHeuristic(base64OrText: string): {
-    hasData: boolean;
-    tipoComprobante?: TipoComprobanteOCR;
-    bancoEmisor?: string;
-    bancoReceptor?: string;
-    fechaComprobante?: string;
-    numeroReferencia?: string;
-    monedaOriginal?: 'VES' | 'USD';
-    montoOriginal?: number;
-    rifCedula?: string;
-    telefonoNombreEmisor?: string;
-    telefonoEmisor?: string;
-  } {
-    let decodedText = base64OrText;
-    try {
-      if (base64OrText.length > 30 && !base64OrText.includes(' ') && typeof atob !== 'undefined') {
-        const bin = atob(base64OrText.replace(/^data:[^;]+;base64,/, ''));
-        const printable = bin.replace(/[^\x20-\x7E\xA0-\xFF]/g, ' ');
-        decodedText += ' ' + printable;
-      }
-    } catch {}
-
-    const lower = decodedText.toLowerCase();
-
-    // 1. Tipo de Comprobante
-    let tipoComprobante: TipoComprobanteOCR = 'PAGO_MOVIL';
-    if (lower.includes('zelle')) tipoComprobante = 'ZELLE';
-    else if (lower.includes('binance') || lower.includes('usdt') || lower.includes('cripto')) tipoComprobante = 'CRIPTOACTIVOS';
-    else if (lower.includes('retencion') || lower.includes('retención')) tipoComprobante = 'RETENCION_FISCAL';
-    else if (lower.includes('transferencia')) tipoComprobante = 'TRANSFERENCIA';
-
-    // 2. Bancos
-    let bancoEmisor = '';
-    let bancoReceptor = '';
-
-    const banks = [
-      { name: 'Bancamiga', match: /bancamiga/i },
-      { name: 'Banco de Venezuela', match: /banco\s+de\s+venezuela|bdv/i },
-      { name: 'Banesco', match: /banesco/i },
-      { name: 'Mercantil', match: /mercantil/i },
-      { name: 'BBVA Provincial', match: /provincial|bbva/i },
-      { name: 'Banco Nacional de Crédito', match: /bnc|banco\s+nacional\s+de\s+cr[eé]dito/i },
-      { name: 'Bancaribe', match: /bancaribe/i },
-      { name: 'Banco Bicentenario', match: /bicentenario/i },
-      { name: 'Banco del Tesoro', match: /tesoro/i },
-      { name: 'Banco Exterior', match: /exterior/i },
-      { name: '100% Banco', match: /100%\s*banco/i },
-      { name: 'Banplus', match: /banplus/i },
-      { name: 'Banco Activo', match: /activo/i },
-      { name: 'Banco Plaza', match: /plaza/i },
-      { name: 'Zelle', match: /zelle/i },
-      { name: 'Binance', match: /binance/i },
-    ];
-
-    const detectedBanks: string[] = [];
-    for (const b of banks) {
-      if (b.match.test(decodedText)) {
-        detectedBanks.push(b.name);
-      }
-    }
-
-    if (detectedBanks.length >= 2) {
-      bancoEmisor = detectedBanks[0];
-      bancoReceptor = detectedBanks[1];
-    } else if (detectedBanks.length === 1) {
-      bancoEmisor = detectedBanks[0];
-    }
-
-    // 3. Monto y Moneda
-    let montoOriginal = 0;
-    let monedaOriginal: 'VES' | 'USD' = 'VES';
-
-    const vesMatch = decodedText.match(/(?:bs\.?|ves|monto|total|pagado)[:\s]*([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})/i) ||
-                     decodedText.match(/([0-9]{1,3}(?:\.[0-9]{3})*,[0-9]{2})\s*(?:bs|ves)/i);
-    const usdMatch = decodedText.match(/(?:\$|usd)[:\s]*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2})/i) ||
-                     decodedText.match(/([0-9]+(?:\.[0-9]{2}))\s*(?:usd|\$)/i);
-
-    if (vesMatch) {
-      const cleanMonto = vesMatch[1].replace(/\./g, '').replace(',', '.');
-      montoOriginal = parseFloat(cleanMonto) || 0;
-      monedaOriginal = 'VES';
-    } else if (usdMatch) {
-      const cleanMonto = usdMatch[1].replace(/,/g, '');
-      montoOriginal = parseFloat(cleanMonto) || 0;
-      monedaOriginal = 'USD';
-    } else {
-      const genericDec = decodedText.match(/([0-9]{1,6}[.,][0-9]{2})/);
-      if (genericDec) {
-        const valStr = genericDec[1].includes(',') ? genericDec[1].replace(/\./g, '').replace(',', '.') : genericDec[1];
-        montoOriginal = parseFloat(valStr) || 0;
-      }
-    }
-
-    // 4. Número de Referencia
-    let numeroReferencia = '';
-    const refMatch = decodedText.match(/(?:referencia|ref|nro|operaci[oó]n|transacci[oó]n|recibo|comprobante)[:\s#.]*([0-9A-Za-z]{6,16})/i) ||
-                     decodedText.match(/\b([0-9]{10,14})\b/);
-    if (refMatch) {
-      numeroReferencia = refMatch[1].replace(/[^0-9A-Za-z]/g, '');
-    }
-
-    // 5. Cédula o RIF
-    let rifCedula = '';
-    const rifMatch = decodedText.match(/\b([VvJjEeGg]-?[0-9]{6,9}(?:-[0-9])?)\b/);
-    if (rifMatch) {
-      const r = rifMatch[1].toUpperCase();
-      rifCedula = r.includes('-') ? r : `${r[0]}-${r.slice(1)}`;
-    }
-
-    // 6. Teléfono
-    let telefonoNombreEmisor = '';
-    const phoneMatch = decodedText.match(/\b(0414|0424|0412|0416|0426)[0-9]{7}\b/) ||
-                       decodedText.match(/\b(?:\+?58)?(414|424|412|416|426)[0-9]{7}\b/);
-    if (phoneMatch) {
-      telefonoNombreEmisor = phoneMatch[0].startsWith('0') ? phoneMatch[0] : `0${phoneMatch[0].replace('+58', '')}`;
-    }
-
-    // 7. Fecha
-    let fechaComprobante = '';
-    const dateMatch = decodedText.match(/\b([0-9]{1,2})[/-]([0-9]{1,2})[/-]([0-9]{2,4})\b/);
-    if (dateMatch) {
-      const day = dateMatch[1].padStart(2, '0');
-      const month = dateMatch[2].padStart(2, '0');
-      let year = dateMatch[3];
-      if (year.length === 2) year = `20${year}`;
-      fechaComprobante = `${year}-${month}-${day}`;
-    }
-
-    const hasData = Boolean(numeroReferencia || montoOriginal > 0 || bancoEmisor || rifCedula);
-
-    return {
-      hasData,
-      tipoComprobante,
-      bancoEmisor,
-      bancoReceptor,
-      fechaComprobante: fechaComprobante || new Date().toISOString().split('T')[0],
-      numeroReferencia,
-      monedaOriginal,
-      montoOriginal,
-      rifCedula,
-      telefonoNombreEmisor,
-      telefonoEmisor: telefonoNombreEmisor,
-    };
-  }
-
-  /**
-   * Guarda un reporte de pago analizado en la bandeja de pre-conciliación
-   */
   static async saveReportedPayment(
     payment: PagoReportadoOCR
   ): Promise<{ success: boolean; id: string; error?: string }> {
@@ -835,4 +917,21 @@ export class OcrForensicService {
   }
 }
 
-export const extractReceiptHeuristic = OcrForensicService.extractReceiptHeuristic;
+export function extractReceiptHeuristic(text: string) {
+  const parsed = parseBankReceiptText(text);
+  return {
+    hasData: parsed.esComprobanteValido || parsed.montoOriginal > 0 || Boolean(parsed.numeroReferencia),
+    tipoComprobante: parsed.tipoComprobante,
+    bancoEmisor: parsed.bancoEmisor,
+    bancoReceptor: parsed.bancoReceptor,
+    fechaComprobante: parsed.fechaComprobante,
+    numeroReferencia: parsed.numeroReferencia,
+    monedaOriginal: parsed.monedaOriginal,
+    montoOriginal: parsed.montoOriginal,
+    rifCedula: parsed.rifCedula,
+    telefonoNombreEmisor: parsed.telefonoNombreEmisor,
+    telefonoEmisor: parsed.telefonoNombreEmisor,
+    cuentaOrigen: parsed.cuentaOrigen,
+    concepto: parsed.concepto,
+  };
+}
