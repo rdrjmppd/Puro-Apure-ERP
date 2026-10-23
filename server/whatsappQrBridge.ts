@@ -908,7 +908,8 @@ export async function initializeBaileysSocket(lineaId: string): Promise<WASocket
     for (const jid of deletedJids) {
       const cleanDigits = jid.replace('@s.whatsapp.net', '').replace('@lid', '').replace(/\D/g, '');
       if (cleanDigits) {
-        await deleteWhatsAppChatHandler(lineaId, cleanDigits);
+        // syncToSocket: false porque la eliminación ya fue ejecutada en el teléfono de WhatsApp
+        await deleteWhatsAppChatHandler(lineaId, cleanDigits, false);
       }
     }
   });
@@ -1334,7 +1335,8 @@ export async function verifyAuthToken(
  */
 export async function deleteWhatsAppChatHandler(
   lineaId: string,
-  contactPhone: string
+  contactPhone: string,
+  syncToSocket: boolean = true
 ): Promise<{ success: boolean; count?: number; error?: string }> {
   try {
     const cleanDigits = contactPhone.replace(/\D/g, '');
@@ -1382,15 +1384,23 @@ export async function deleteWhatsAppChatHandler(
       }
     }
 
-    // Sincronizar borrado con el teléfono real de WhatsApp si el socket está activo
-    const sock = activeSockets.get(lineaId);
-    if (sock) {
-      try {
-        const jid = `${cleanDigits}@s.whatsapp.net`;
-        await sock.chatModify({ delete: true, lastMessages: [] }, jid);
-        console.log(`[WhatsApp Bridge] Sincronizado borrado de chat ${jid} con WhatsApp real.`);
-      } catch (sockErr) {
-        console.debug('[WhatsApp Bridge] No se pudo sincronizar borrado con socket Baileys:', sockErr);
+    // Sincronizar borrado con el teléfono real de WhatsApp si el socket está activo y no proviene de un evento de borrado del propio socket
+    if (syncToSocket) {
+      const sock = activeSockets.get(lineaId);
+      if (sock) {
+        try {
+          const jid = `${cleanDigits}@s.whatsapp.net`;
+          await sock.chatModify({ delete: true, lastMessages: [] }, jid);
+          console.log(`[WhatsApp Bridge] Sincronizado borrado de chat ${jid} con WhatsApp real.`);
+        } catch (sockErr: any) {
+          const errMsg = sockErr?.message || sockErr?.output?.payload?.message || String(sockErr || '');
+          const isOverlimit = errMsg.includes('rate-overlimit') || sockErr?.data === 429 || sockErr?.output?.statusCode === 429;
+          if (isOverlimit) {
+            console.log(`[WhatsApp Bridge] Límite de tasa al sincronizar borrado con WhatsApp real (${cleanDigits}), continuando normalmente.`);
+          } else {
+            console.log(`[WhatsApp Bridge] Aviso al sincronizar borrado con Baileys (${cleanDigits}): ${errMsg}`);
+          }
+        }
       }
     }
 
@@ -1404,8 +1414,8 @@ export async function deleteWhatsAppChatHandler(
 
     return { success: true, count: docIds.size };
   } catch (err: any) {
-    console.error('[WhatsApp Bridge] Error al eliminar chat:', err);
-    return { success: false, error: err.message };
+    console.error('[WhatsApp Bridge] Error al eliminar chat:', err?.message || err);
+    return { success: false, error: err?.message || String(err) };
   }
 }
 
@@ -1419,6 +1429,35 @@ export async function analyzeReceiptOcrHandler(
   base64Clean: string,
   mimeType: string = 'image/jpeg'
 ): Promise<{ success: boolean; data?: any; error?: string }> {
+  const cleanInput = (base64Clean || '').trim().replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '');
+
+  // Si no se suministró una imagen con contenido binario real, retornar de inmediato campos defensivos
+  if (!cleanInput || cleanInput.length < 50) {
+    return {
+      success: true,
+      data: {
+        tipoComprobante: 'PAGO_MOVIL',
+        bancoEmisor: '',
+        bancoReceptor: '',
+        codigoBancoDestino: '',
+        fechaComprobante: getCaracasToday(),
+        horaComprobante: '',
+        fechaHoraDisplay: '',
+        numeroReferencia: '',
+        monedaOriginal: 'VES',
+        montoOriginal: 0,
+        rifCedula: '',
+        telefonoNombreEmisor: '',
+        cuentaOrigen: '',
+        concepto: '',
+        consistenciaTipografica: true,
+        halosDeColor: false,
+        patronBancarioValido: false,
+        analisisVisualDetalle: 'No se suministró una imagen legible para análisis OCR.',
+      },
+    };
+  }
+
   const apiKey = (process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '').trim();
   const hasValidApiKey = Boolean(apiKey && apiKey.startsWith('AIzaSy') && apiKey.length >= 35);
 
@@ -1474,7 +1513,7 @@ REGLAS OBLIGATORIAS:
                 {
                   inlineData: {
                     mimeType: mimeType || 'image/jpeg',
-                    data: base64Clean,
+                    data: cleanInput,
                   },
                 },
                 { text: prompt },
@@ -1526,8 +1565,9 @@ REGLAS OBLIGATORIAS:
             analisisVisualDetalle: `Comprobante analizado con peritaje multimodal (${model}).`,
           },
         };
-      } catch (err) {
-        console.debug(`[OCR Backend] Reintentando tras incidencia con ${model}:`, err?.message || err);
+      } catch (err: any) {
+        const errorMsg = err?.message || (typeof err === 'object' ? JSON.stringify(err) : String(err));
+        console.log(`[OCR Backend] Reintentando tras incidencia con ${model}: ${errorMsg.slice(0, 100)}`);
       }
     }
   }
@@ -1536,43 +1576,57 @@ REGLAS OBLIGATORIAS:
   // CAPA 2: Respaldo Óptico Real sobre Píxeles mediante Tesseract OCR en Servidor
   // =========================================================================
   try {
-    const { createWorker } = await import('tesseract.js');
-    const worker = await createWorker('spa+eng');
-    const imageBuffer = Buffer.from(base64Clean, 'base64');
-    const ret = await worker.recognize(imageBuffer);
-    await worker.terminate();
-
-    const ocrRawText = ret?.data?.text || '';
-    if (ocrRawText.trim().length > 10) {
-      const parsed = parseBankReceiptText(ocrRawText);
-      if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
-        return {
-          success: true,
-          data: {
-            tipoComprobante: parsed.tipoComprobante,
-            bancoEmisor: parsed.bancoEmisor,
-            bancoReceptor: parsed.bancoReceptor,
-            codigoBancoDestino: parsed.codigoBancoDestino,
-            fechaComprobante: parsed.fechaComprobante,
-            horaComprobante: parsed.horaComprobante,
-            fechaHoraDisplay: parsed.fechaHoraDisplay,
-            numeroReferencia: parsed.numeroReferencia,
-            monedaOriginal: parsed.monedaOriginal,
-            montoOriginal: parsed.montoOriginal,
-            rifCedula: parsed.rifCedula,
-            telefonoNombreEmisor: parsed.telefonoNombreEmisor,
-            cuentaOrigen: parsed.cuentaOrigen,
-            concepto: parsed.concepto,
-            consistenciaTipografica: true,
-            halosDeColor: false,
-            patronBancarioValido: true,
-            analisisVisualDetalle: 'Extracción óptica de píxeles mediante Tesseract OCR local con parser bancario nacional.',
-          },
-        };
+    const imageBuffer = Buffer.from(cleanInput, 'base64');
+    if (imageBuffer.length >= 100) {
+      const { createWorker } = await import('tesseract.js');
+      let worker: any = null;
+      try {
+        worker = await createWorker(['spa', 'eng'], 1, {
+          langPath: process.cwd(),
+          logger: () => {},
+        });
+        const ret = await worker.recognize(imageBuffer);
+        const ocrRawText = ret?.data?.text || '';
+        if (ocrRawText.trim().length > 10) {
+          const parsed = parseBankReceiptText(ocrRawText);
+          if (parsed.esComprobanteValido || parsed.montoOriginal > 0 || parsed.numeroReferencia) {
+            return {
+              success: true,
+              data: {
+                tipoComprobante: parsed.tipoComprobante,
+                bancoEmisor: parsed.bancoEmisor,
+                bancoReceptor: parsed.bancoReceptor,
+                codigoBancoDestino: parsed.codigoBancoDestino,
+                fechaComprobante: parsed.fechaComprobante,
+                horaComprobante: parsed.horaComprobante,
+                fechaHoraDisplay: parsed.fechaHoraDisplay,
+                numeroReferencia: parsed.numeroReferencia,
+                monedaOriginal: parsed.monedaOriginal,
+                montoOriginal: parsed.montoOriginal,
+                rifCedula: parsed.rifCedula,
+                telefonoNombreEmisor: parsed.telefonoNombreEmisor,
+                cuentaOrigen: parsed.cuentaOrigen,
+                concepto: parsed.concepto,
+                consistenciaTipografica: true,
+                halosDeColor: false,
+                patronBancarioValido: true,
+                analisisVisualDetalle: 'Extracción óptica de píxeles mediante Tesseract OCR local con parser bancario nacional.',
+              },
+            };
+          }
+        }
+      } catch (workerErr: any) {
+        console.log('[OCR Backend] Reconocimiento Tesseract:', workerErr?.message || String(workerErr));
+      } finally {
+        if (worker) {
+          try {
+            await worker.terminate();
+          } catch (_) {}
+        }
       }
     }
-  } catch (tessErr) {
-    console.debug('[OCR Backend] Motor Tesseract local no disponible:', tessErr?.message || tessErr);
+  } catch (tessErr: any) {
+    console.log('[OCR Backend] Motor Tesseract local en segundo plano:', tessErr?.message || String(tessErr));
   }
 
   // Fallback Defensivo Cero Mock Data: Si no se pudo leer la imagen, devolver campos limpios sin datos inventados
